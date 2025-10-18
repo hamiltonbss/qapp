@@ -416,7 +416,7 @@ def render_questao(q_row, parent_qid, questao_numero=None):
         if st.session_state.get(result_key):
             st.success("✅ Correto!")
         else:
-            st.error("❌ Incorreto.")
+            st.error(f"❌ Incorreto. Gabarito: {q_row['correta_text']}")
 
     # Favoritar
     if st.button("⭐ Salvar nos Favoritos", key=f"fav_{qid}"):
