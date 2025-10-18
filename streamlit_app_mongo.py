@@ -9,37 +9,70 @@ from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson import ObjectId
 
 # =============================
-# Config & Globals
+# Config & Globals (prefer st.secrets; fallback to env)
 # =============================
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "quiz_app")
+MONGO_URI = st.secrets.get("MONGO_URI", os.environ.get("MONGO_URI", ""))
+MONGO_DB_NAME = st.secrets.get("MONGO_DB_NAME", os.environ.get("MONGO_DB_NAME", "quiz_app"))
 
 st.set_page_config(page_title="Estudos | Questionários & Simulados (MongoDB)", layout="wide")
+
+# =============================
+# Utility: show connection status
+# =============================
+def connection_status():
+    with st.sidebar:
+        st.caption("⚙️ Conexão MongoDB")
+        if not MONGO_URI:
+            st.error("MONGO_URI não definido em Secrets/Env.")
+            return False
+        try:
+            MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000).admin.command("ping")
+            st.success("MongoDB conectado ✅")
+            st.code(f"MONGO_DB_NAME={MONGO_DB_NAME}", language="bash")
+            return True
+        except Exception as e:
+            st.error(f"Falha de conexão: {e}")
+            return False
 
 # =============================
 # Database helpers (MongoDB)
 # =============================
 def get_db():
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     return client[MONGO_DB_NAME]
 
 def init_db():
     db = get_db()
-    # Indexes & constraints
-    db.questionarios.create_index([("nome", ASCENDING)], name="uq_nome", unique=True)
-    db.questoes.create_index([("questionario_id", ASCENDING)])
-    db.respostas.create_index([("questionario_id", ASCENDING)])
-    db.respostas.create_index([("questao_id", ASCENDING)])
+    # Criação de índices com diagnóstico detalhado
+    try:
+        db.questionarios.create_index([("nome", ASCENDING)], name="uq_nome", unique=True)
+    except Exception as e:
+        st.warning(f"[init_db] create_index(questionarios.nome) falhou: {e}")
+    try:
+        db.questoes.create_index([("questionario_id", ASCENDING)])
+    except Exception as e:
+        st.warning(f"[init_db] create_index(questoes.questionario_id) falhou: {e}")
+    try:
+        db.respostas.create_index([("questionario_id", ASCENDING)])
+    except Exception as e:
+        st.warning(f"[init_db] create_index(respostas.questionario_id) falhou: {e}")
+    try:
+        db.respostas.create_index([("questao_id", ASCENDING)])
+    except Exception as e:
+        st.warning(f"[init_db] create_index(respostas.questao_id) falhou: {e}")
     # Garantir existência do questionário "Favoritos"
-    if db.questionarios.count_documents({"nome": "Favoritos"}) == 0:
-        db.questionarios.insert_one({
-            "nome": "Favoritos",
-            "descricao": "Questões salvas como favoritas.",
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })
+    try:
+        if db.questionarios.count_documents({"nome": "Favoritos"}) == 0:
+            db.questionarios.insert_one({
+                "nome": "Favoritos",
+                "descricao": "Questões salvas como favoritas.",
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+    except Exception as e:
+        st.warning(f"[init_db] criação do questionário 'Favoritos' falhou: {e}")
 
 def _doc_to_row_q(q):
-    """Converte questionário Mongo -> dict compatível com o app (id:str)."""
+    """Converte questionário Mongo -> dict (id:str)."""
     return {"id": str(q["_id"]), "nome": q.get("nome",""), "descricao": q.get("descricao","")}
 
 def _doc_to_row_questao(d):
@@ -60,7 +93,12 @@ def _doc_to_row_questao(d):
 
 def get_questionarios():
     db = get_db()
-    return [_doc_to_row_q(x) for x in db.questionarios.find({}).sort("nome", ASCENDING)]
+    try:
+        cur = db.questionarios.find({}).sort("nome", ASCENDING)
+        return [_doc_to_row_q(x) for x in cur]
+    except Exception as e:
+        st.error(f"[get_questionarios] erro: {e}")
+        return []
 
 def get_questionario_by_name(name):
     db = get_db()
@@ -545,7 +583,7 @@ def page_simulado():
     if not qs_all:
         st.info("Crie ou importe questionários primeiro.")
         return
-    options = {f"{q['nome']} (id {q['id']})": q["id"] for q in qs_all}
+    options = {f"{q['nome']} (id {q['id']})": q['id'] for q in qs_all}
     escolha = st.multiselect("Selecione um ou mais questionários", list(options.keys()))
     qids = [options[k] for k in escolha]
 
@@ -636,6 +674,10 @@ def page_run_simulado():
 # Main Navigation
 # =============================
 def main():
+    ok = connection_status()
+    if not ok:
+        st.stop()
+
     init_db()
 
     st.session_state.setdefault("nav_choice", "Painel")
@@ -645,10 +687,6 @@ def main():
     with st.sidebar:
         st.header("Navegação")
         choice = st.radio("Ir para", ["Painel", "Praticar", "Gerenciar", "Importar CSV", "Simulados"], key="nav_choice")
-
-        st.markdown("---")
-        st.caption("⚙️ Conexão")
-        st.code(f"MONGO_URI={os.environ.get('MONGO_URI','<defina>')}\nMONGO_DB_NAME={os.environ.get('MONGO_DB_NAME','quiz_app')}", language="bash")
 
     if choice == "Painel":
         page_dashboard()
