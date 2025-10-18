@@ -510,15 +510,15 @@ def page_praticar():
     # Calcula número da questão (total - restantes + 1)
     total_questoes = len(get_questoes(qid))
     questao_numero = total_questoes - len(pool) + 1
-
+  
     # Botão próxima questão (topo)
-if st.button("Próxima questão ▶", key="next_top"):
-    pool.pop()
-    for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
-        if k in st.session_state:
-            del st.session_state[k]
-    st.rerun()
-
+    if st.button("Próxima questão ▶", key="next_top"):
+        pool.pop()
+        for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.rerun()
+        
     render_questao(row, parent_qid=qid, questao_numero=questao_numero)
 
     # Mostrar desempenho atualizado
