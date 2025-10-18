@@ -115,7 +115,7 @@ def add_questao_mc(questionario_id, texto, alternativas, correta_letra, explicac
     if correta_letra not in list("ABCDE")[:len(alternativas)]:
         idx = None
         for i, alt in enumerate(alternativas):
-            if alt is None: 
+            if alt is None:
                 continue
             if str(alt).strip().lower() == correta_letra.strip().lower():
                 idx = i
@@ -159,19 +159,32 @@ def save_resposta(questionario_id, questao_id, correto):
         conn.commit()
 
 def desempenho_questionario(questionario_id):
+    """
+    Define desempenho como: (# de questões cujo *último* registro em respostas é correto) / (total de questões do questionário).
+    """
     with get_conn() as conn:
         c = conn.cursor()
+        # Total de questões do questionário
+        c.execute("SELECT COUNT(*) FROM questoes WHERE questionario_id = ?;", (questionario_id,))
+        total = c.fetchone()[0] or 0
+
+        # Número de questões com última resposta correta
         c.execute("""
-            SELECT COUNT(*) as total,
-                   SUM(CASE WHEN correto = 1 THEN 1 ELSE 0 END) as acertos
-            FROM respostas
-            WHERE questionario_id = ?;
+            WITH ult AS (
+              SELECT questao_id, MAX(id) AS max_id
+              FROM respostas
+              WHERE questionario_id = ?
+              GROUP BY questao_id
+            )
+            SELECT COUNT(1)
+            FROM ult
+            JOIN respostas r ON r.id = ult.max_id
+            WHERE r.correto = 1;
         """, (questionario_id,))
-        row = c.fetchone()
-        total = row["total"] or 0
-        acertos = row["acertos"] or 0
-        perc = (acertos/total)*100 if total > 0 else 0.0
-        return total, acertos, perc
+        acertos = c.fetchone()[0] or 0
+
+    perc = (acertos/total)*100 if total > 0 else 0.0
+    return total, acertos, perc
 
 def duplicar_questao_para_favoritos(questao_id):
     fav = get_questionario_by_name("Favoritos")
@@ -300,9 +313,9 @@ def show_desempenho_block(qid):
     total, acertos, perc = desempenho_questionario(qid)
     c1, c2, c3 = st.columns([1,1,2])
     with c1:
-        st.metric("Resp.", total)
+        st.metric("Total", total)
     with c2:
-        st.metric("Acertos", acertos)
+        st.metric("Corretas", acertos)
     with c3:
         st.progress(int(perc), text=f"Aproveitamento: {perc:.1f}%")
 
@@ -332,7 +345,7 @@ def page_dashboard():
                 with b1:
                     if st.button("Praticar", key=f"pr_{q['id']}"):
                         st.session_state["current_qid"] = q["id"]
-                        st.session_state["nav_choice"] = "Praticar"
+                        st.session_state["go_to"] = "Praticar"  # evita setar nav_choice diretamente (bug do Streamlit)
                         st.rerun()
                 with b2:
                     if q["nome"] != "Favoritos" and st.button("Excluir", key=f"del_{q['id']}"):
@@ -342,7 +355,7 @@ def page_dashboard():
                 with b3:
                     if st.button("Ver questões", key=f"ver_{q['id']}"):
                         st.session_state["current_qid"] = q["id"]
-                        st.session_state["nav_choice"] = "Gerenciar"
+                        st.session_state["go_to"] = "Gerenciar"
                         st.rerun()
         slot += 1
 
@@ -355,27 +368,24 @@ def render_questao(q_row, parent_qid):
     result_key = f"result_{qid}"   # True/False
 
     if tipo == "VF":
-        escolha = st.radio("Sua resposta", ["Verdadeiro", "Falso"], key=f"vf_{qid}")
-        # Avaliação instantânea ao selecionar
-        if answered_key not in st.session_state:
-            if escolha:  # sempre há um valor
-                gabarito = (q_row["correta_text"] == "V")
-                user = (escolha == "Verdadeiro")
-                is_correct = (gabarito == user)
-                st.session_state[answered_key] = True
-                st.session_state[result_key] = is_correct
-                save_resposta(parent_qid, qid, is_correct)
+        # Opção neutra para vir desmarcada
+        vf_options = ["— Selecione —", "Verdadeiro", "Falso"]
+        escolha = st.radio("Sua resposta", vf_options, key=f"vf_{qid}", index=0)
+        if answered_key not in st.session_state and escolha != "— Selecione —":
+            gabarito = (q_row["correta_text"] == "V")
+            user = (escolha == "Verdadeiro")
+            is_correct = (gabarito == user)
+            st.session_state[answered_key] = True
+            st.session_state[result_key] = is_correct
+            save_resposta(parent_qid, qid, is_correct)
     else:
         alternativas = [q_row["op_a"], q_row["op_b"], q_row["op_c"], q_row["op_d"], q_row["op_e"]]
         letras = ["A","B","C","D","E"]
         opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
-        labels = [f"{letra}) {alt}" for letra, alt in opts]
-        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_{qid}")
-        if answered_key not in st.session_state and escolha:
-            try:
-                letra_escolhida = escolha.split(")")[0]
-            except Exception:
-                letra_escolhida = None
+        labels = ["— Selecione —"] + [f"{letra}) {alt}" for letra, alt in opts]
+        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_{qid}", index=0)
+        if answered_key not in st.session_state and escolha != "— Selecione —":
+            letra_escolhida = escolha.split(")")[0]
             is_correct = (letra_escolhida == q_row["correta_text"])
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
@@ -401,6 +411,9 @@ def render_questao(q_row, parent_qid):
 def page_praticar():
     st.title("🎯 Praticar")
     qs = get_questionarios()
+    if not qs:
+        st.info("Nenhum questionário cadastrado.")
+        return
     nomes = {q["nome"]: q["id"] for q in qs}
     default_id = st.session_state.get("current_qid")
     default_name = None
@@ -414,7 +427,7 @@ def page_praticar():
     qid = nomes[escolha]
     st.session_state["current_qid"] = qid
 
-    # Cabeçalho de desempenho (antes e depois)
+    # Cabeçalho de desempenho
     st.subheader("Desempenho")
     show_desempenho_block(qid)
 
@@ -446,13 +459,12 @@ def page_praticar():
 
     render_questao(row, parent_qid=qid)
 
-    # Mostrar desempenho atualizado imediatamente (sem precisar mudar de pergunta)
+    # Mostrar desempenho atualizado imediatamente
     st.subheader("Desempenho (atualizado)")
     show_desempenho_block(qid)
 
-    # Próxima questão só quando o usuário clicar
+    # Próxima questão
     if st.button("Próxima questão ▶"):
-        # avança e limpa flags desta questão
         pool.pop()
         for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
             if k in st.session_state:
@@ -553,8 +565,8 @@ def page_simulado():
         st.session_state["simulado_pool"] = [dict(r) for r in get_random_questoes(qids, n)]
         st.session_state["simulado_idx"] = 0
         st.session_state["simulado_acertos"] = 0
-        st.session_state["nav_choice"] = "Simulados"
         st.session_state["mode"] = "run_simulado"
+        st.session_state["go_to"] = "Simulados"  # navegação controlada
         st.rerun()
 
 def page_run_simulado():
@@ -569,15 +581,13 @@ def page_run_simulado():
         st.success(f"Fim do simulado! Acertos: {acertos}/{total} ({perc:.1f}%).")
         if st.button("Voltar aos simulados"):
             st.session_state["mode"] = None
-            st.session_state["nav_choice"] = "Simulados"
+            st.session_state["go_to"] = "Simulados"
             st.rerun()
         return
 
     q = pool[idx]
     st.info(f"Questão {idx+1} de {len(pool)}")
 
-    # Reuso do render com lógica instantânea e sem salvar no questionário 'simulado'
-    # Aqui não gravamos em respostas (para não contaminar métricas dos questionários originais)
     qid = q["id"]
     tipo = q["tipo"]
     st.markdown(f"#### Q{qid} – {q['texto']}")
@@ -586,27 +596,31 @@ def page_run_simulado():
     result_key = f"result_sim_{qid}"
 
     if tipo == "VF":
-        escolha = st.radio("Sua resposta", ["Verdadeiro", "Falso"], key=f"vf_sim_{qid}")
-        if answered_key not in st.session_state and escolha:
+        vf_options = ["— Selecione —", "Verdadeiro", "Falso"]
+        escolha = st.radio("Sua resposta", vf_options, key=f"vf_sim_{qid}", index=0)
+        if answered_key not in st.session_state and escolha != "— Selecione —":
             gabarito = (q["correta_text"] == "V")
             user = (escolha == "Verdadeiro")
             st.session_state[answered_key] = True
             st.session_state[result_key] = (gabarito == user)
+            if st.session_state[result_key]:
+                st.session_state["simulado_acertos"] = acertos + 1
     else:
         alternativas = [q["op_a"], q["op_b"], q["op_c"], q["op_d"], q["op_e"]]
         letras = ["A","B","C","D","E"]
         opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
-        labels = [f"{letra}) {alt}" for letra, alt in opts]
-        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_sim_{qid}")
-        if answered_key not in st.session_state and escolha:
+        labels = ["— Selecione —"] + [f"{letra}) {alt}" for letra, alt in opts]
+        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_sim_{qid}", index=0)
+        if answered_key not in st.session_state and escolha != "— Selecione —":
             letra_escolhida = escolha.split(")")[0]
             st.session_state[answered_key] = True
             st.session_state[result_key] = (letra_escolhida == q["correta_text"])
+            if st.session_state[result_key]:
+                st.session_state["simulado_acertos"] = acertos + 1
 
     if st.session_state.get(answered_key):
         if st.session_state.get(result_key):
             st.success("✅ Correto!")
-            st.session_state["simulado_acertos"] = acertos + 1
         else:
             st.error("❌ Incorreto.")
         if q.get("explicacao"):
@@ -626,10 +640,14 @@ def page_run_simulado():
 def main():
     init_db()
 
-    # Sidebar com estado controlado
+    # BEFORE rendering the sidebar, consume any programmatic navigation requests
+    st.session_state.setdefault("nav_choice", "Painel")
+    if "go_to" in st.session_state:
+        st.session_state["nav_choice"] = st.session_state.pop("go_to")
+
+    # Sidebar with controlled key
     with st.sidebar:
         st.header("Navegação")
-        st.session_state.setdefault("nav_choice", "Painel")
         choice = st.radio("Ir para", ["Painel", "Praticar", "Gerenciar", "Importar CSV", "Simulados"], key="nav_choice")
 
     if choice == "Painel":
