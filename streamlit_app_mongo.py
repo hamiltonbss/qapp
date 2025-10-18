@@ -272,8 +272,8 @@ def parse_alternativas(val):
     if val is None:
         return []
     s = str(val).strip()
-    sep = ";" if ";" in s else "|"
-    parts = [p.strip() for p in s.split(sep) if p.strip()]
+    # Usa APENAS @@ como separador
+    parts = [p.strip() for p in s.split("@@") if p.strip()]
     if len(parts) > 5:
         parts = parts[:5]
     return parts
