@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Streamlit secrets (NÃO commitar credenciais reais)
+.streamlit/secrets.toml
+
+# Misc
+.DS_Store
