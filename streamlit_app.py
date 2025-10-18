@@ -5,7 +5,6 @@ import random
 import io
 import csv
 from datetime import datetime
-from pathlib import Path
 
 import streamlit as st
 import pandas as pd
@@ -31,7 +30,6 @@ def init_db():
     with get_conn() as conn:
         c = conn.cursor()
 
-        # Questionários básicos
         c.execute("""
         CREATE TABLE IF NOT EXISTS questionarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,8 +39,6 @@ def init_db():
         );
         """)
 
-        # Questões: tipo VF (V/F) ou MC (múltipla escolha)
-        # Armazenamos até 5 alternativas (A-E) para MC. Campos podem ser NULL para VF.
         c.execute("""
         CREATE TABLE IF NOT EXISTS questoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,14 +46,13 @@ def init_db():
             tipo TEXT NOT NULL CHECK (tipo IN ('VF','MC')),
             texto TEXT NOT NULL,
             explicacao TEXT,
-            correta_text TEXT NOT NULL,             -- 'V'/'F' para VF; 'A'..'E' ou texto exato para MC (guardamos a letra)
+            correta_text TEXT NOT NULL,
             op_a TEXT, op_b TEXT, op_c TEXT, op_d TEXT, op_e TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY (questionario_id) REFERENCES questionarios(id) ON DELETE CASCADE
         );
         """)
 
-        # Respostas do usuário (para métricas de desempenho)
         c.execute("""
         CREATE TABLE IF NOT EXISTS respostas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +65,6 @@ def init_db():
         );
         """)
 
-        # Índices para desempenho
         c.execute("CREATE INDEX IF NOT EXISTS idx_questoes_questionario ON questoes(questionario_id);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_respostas_q ON respostas(questionario_id);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_respostas_questao ON respostas(questao_id);")
@@ -116,14 +110,12 @@ def add_questao_vf(questionario_id, texto, correta, explicacao=""):
         conn.commit()
 
 def add_questao_mc(questionario_id, texto, alternativas, correta_letra, explicacao=""):
-    # alternativas: list up to 5 strings (A..E)
     op = alternativas + [None]* (5 - len(alternativas))
-    correta_letra = correta_letra.upper().strip()
+    correta_letra = str(correta_letra).upper().strip()
     if correta_letra not in list("ABCDE")[:len(alternativas)]:
-        # tente mapear por igualdade de texto
         idx = None
         for i, alt in enumerate(alternativas):
-            if alt is None:
+            if alt is None: 
                 continue
             if str(alt).strip().lower() == correta_letra.strip().lower():
                 idx = i
@@ -144,15 +136,10 @@ def add_questao_mc(questionario_id, texto, alternativas, correta_letra, explicac
 def get_questoes(questionario_id):
     with get_conn() as conn:
         c = conn.cursor()
-        c.execute("""
-            SELECT * FROM questoes
-            WHERE questionario_id = ?
-            ORDER BY id;
-        """, (questionario_id,))
+        c.execute("SELECT * FROM questoes WHERE questionario_id = ? ORDER BY id;", (questionario_id,))
         return c.fetchall()
 
 def get_random_questoes(questionario_ids, n):
-    # retorna até n questões, amostrando aleatoriamente entre questionários escolhidos
     placeholders = ",".join(["?"]*len(questionario_ids))
     with get_conn() as conn:
         c = conn.cursor()
@@ -167,10 +154,8 @@ def get_random_questoes(questionario_ids, n):
 def save_resposta(questionario_id, questao_id, correto):
     with get_conn() as conn:
         c = conn.cursor()
-        c.execute("""
-            INSERT INTO respostas (questionario_id, questao_id, correto)
-            VALUES (?, ?, ?);
-        """, (questionario_id, questao_id, 1 if correto else 0))
+        c.execute("INSERT INTO respostas (questionario_id, questao_id, correto) VALUES (?, ?, ?);",
+                  (questionario_id, questao_id, 1 if correto else 0))
         conn.commit()
 
 def desempenho_questionario(questionario_id):
@@ -212,7 +197,7 @@ def duplicar_questao_para_favoritos(questao_id):
     return True
 
 # =============================
-# CSV Import Helpers
+# CSV Import
 # =============================
 TEMPLATE_DOC = """
 FORMATO CSV SUPORTADO (delimitador vírgula ou ponto e vírgula)
@@ -244,39 +229,26 @@ def parse_alternativas(val):
     s = str(val).strip()
     sep = ";" if ";" in s else "|"
     parts = [p.strip() for p in s.split(sep) if p.strip()]
-    if len(parts) == 0:
-        return []
     if len(parts) > 5:
         parts = parts[:5]
     return parts
 
 def ensure_questionario(nome):
-    nome = str(nome).strip()
-    if not nome:
-        nome = "Sem Título"
+    nome = str(nome).strip() or "Sem Título"
     q = get_questionario_by_name(nome)
-    if q:
-        return q["id"] if isinstance(q, sqlite3.Row) else q[0]
+    if q: return q["id"] if isinstance(q, sqlite3.Row) else q[0]
     add_questionario(nome, "")
     q = get_questionario_by_name(nome)
     return q["id"] if isinstance(q, sqlite3.Row) else q[0]
 
 def import_csv_to_db(filelike_or_str):
-    """
-    Aceita:
-      - arquivo enviado via st.file_uploader (BytesIO)
-      - string de CSV colada
-    """
     if hasattr(filelike_or_str, "read"):
         content = filelike_or_str.read()
-        try:
-            txt = content.decode("utf-8")
-        except Exception:
-            txt = content.decode("latin-1")
+        try: txt = content.decode("utf-8")
+        except Exception: txt = content.decode("latin-1")
     else:
         txt = str(filelike_or_str)
 
-    # Detectar separador automaticamente com csv.Sniffer
     sample = txt[:2048]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=";,")
@@ -291,7 +263,7 @@ def import_csv_to_db(filelike_or_str):
         raise ValueError(f"CSV sem colunas obrigatórias: {missing}. Cabeçalho encontrado: {reader.fieldnames}")
 
     ok, erros = 0, []
-    for i, row in enumerate(reader, start=2):  # start=2 por causa do cabeçalho
+    for i, row in enumerate(reader, start=2):
         try:
             tipo = str(row.get("tipo","")).strip().upper()
             questionario = row.get("questionario","").strip() or "Sem Título"
@@ -312,10 +284,7 @@ def import_csv_to_db(filelike_or_str):
                 alternativas = parse_alternativas(row.get("alternativas",""))
                 if len(alternativas) < 2:
                     raise ValueError("Questão MC requer ao menos 2 alternativas.")
-                # correta pode ser letra ou texto
-                correta_cand = correta
-                # Se for número (porta 80) ou letra, tratamos abaixo em add_questao_mc
-                add_questao_mc(qid, texto, alternativas, correta_cand, explicacao)
+                add_questao_mc(qid, texto, alternativas, correta, explicacao)
                 ok += 1
             else:
                 raise ValueError("tipo deve ser 'VF' ou 'MC'.")
@@ -327,25 +296,18 @@ def import_csv_to_db(filelike_or_str):
 # =============================
 # UI Helpers
 # =============================
-def metric_card(title, value, help_text=None):
-    with st.container(border=True):
-        st.markdown(f"**{title}**")
-        st.markdown(f"### {value}")
-        if help_text:
-            st.caption(help_text)
-
 def show_desempenho_block(qid):
     total, acertos, perc = desempenho_questionario(qid)
-    c1, c2, c3 = st.columns([1,1,3])
+    c1, c2, c3 = st.columns([1,1,2])
     with c1:
-        metric_card("Respondidas", total)
+        st.metric("Resp.", total)
     with c2:
-        metric_card("Acertos", acertos)
+        st.metric("Acertos", acertos)
     with c3:
         st.progress(int(perc), text=f"Aproveitamento: {perc:.1f}%")
 
 # =============================
-# Páginas (Router)
+# Páginas
 # =============================
 def page_dashboard():
     st.title("📚 Painel de Questionários")
@@ -354,71 +316,74 @@ def page_dashboard():
         st.info("Nenhum questionário cadastrado ainda. Vá em **Importar CSV** para começar.")
         return
 
-    # Busca
     filtro = st.text_input("🔎 Buscar por nome")
-    cols = st.columns(3)
-    count = 0
+    cols = st.columns(2)
+    slot = 0
     for q in qs:
         if filtro and filtro.lower() not in q["nome"].lower():
             continue
-        with cols[count % 3]:
-            st.subheader(q["nome"])
-            if q["descricao"]:
-                st.caption(q["descricao"])
-            show_desempenho_block(q["id"])
-            b1, b2, b3 = st.columns(3)
-            with b1:
-                if st.button("Praticar", key=f"pr_{q['id']}"):
-                    st.session_state["mode"] = "practice"
-                    st.session_state["current_qid"] = q["id"]
-                    st.rerun()
-            with b2:
-                if q["nome"] != "Favoritos" and st.button("Excluir", key=f"del_{q['id']}"):
-                    delete_questionario(q["id"])
-                    st.success(f"Questionário '{q['nome']}' excluído.")
-                    st.rerun()
-            with b3:
-                if st.button("Ver questões", key=f"ver_{q['id']}"):
-                    st.session_state["mode"] = "manage"
-                    st.session_state["current_qid"] = q["id"]
-                    st.rerun()
-        count += 1
+        with cols[slot % 2]:
+            with st.container(border=True):
+                st.subheader(q["nome"])
+                if q["descricao"]:
+                    st.caption(q["descricao"])
+                show_desempenho_block(q["id"])
+                b1, b2, b3 = st.columns(3)
+                with b1:
+                    if st.button("Praticar", key=f"pr_{q['id']}"):
+                        st.session_state["current_qid"] = q["id"]
+                        st.session_state["nav_choice"] = "Praticar"
+                        st.rerun()
+                with b2:
+                    if q["nome"] != "Favoritos" and st.button("Excluir", key=f"del_{q['id']}"):
+                        delete_questionario(q["id"])
+                        st.success(f"Questionário '{q['nome']}' excluído.")
+                        st.rerun()
+                with b3:
+                    if st.button("Ver questões", key=f"ver_{q['id']}"):
+                        st.session_state["current_qid"] = q["id"]
+                        st.session_state["nav_choice"] = "Gerenciar"
+                        st.rerun()
+        slot += 1
 
-def render_questao(q_row, show_favorito=True, record=False, parent_qid=None):
-    """
-    Exibe questão e retorna (answered, correto) se o usuário responder.
-    Se record=True, salva a resposta em 'respostas' usando parent_qid.
-    """
+def render_questao(q_row, parent_qid):
     qid = q_row["id"]
     tipo = q_row["tipo"]
-    st.markdown(f"#### Q{qid} - {q_row['texto']}")
+    st.markdown(f"#### Q{qid} – {q_row['texto']}")
 
-    correto = None
-    answered = False
+    answered_key = f"answered_{qid}"
+    result_key = f"result_{qid}"   # True/False
 
     if tipo == "VF":
         escolha = st.radio("Sua resposta", ["Verdadeiro", "Falso"], key=f"vf_{qid}")
-        if st.button("Responder", key=f"btn_vf_{qid}"):
-            gabarito = q_row["correta_text"] == "V"
-            user = (escolha == "Verdadeiro")
-            correto = (gabarito == user)
-            answered = True
+        # Avaliação instantânea ao selecionar
+        if answered_key not in st.session_state:
+            if escolha:  # sempre há um valor
+                gabarito = (q_row["correta_text"] == "V")
+                user = (escolha == "Verdadeiro")
+                is_correct = (gabarito == user)
+                st.session_state[answered_key] = True
+                st.session_state[result_key] = is_correct
+                save_resposta(parent_qid, qid, is_correct)
     else:
         alternativas = [q_row["op_a"], q_row["op_b"], q_row["op_c"], q_row["op_d"], q_row["op_e"]]
         letras = ["A","B","C","D","E"]
         opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
         labels = [f"{letra}) {alt}" for letra, alt in opts]
         escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_{qid}")
-        if st.button("Responder", key=f"btn_mc_{qid}"):
+        if answered_key not in st.session_state and escolha:
             try:
                 letra_escolhida = escolha.split(")")[0]
             except Exception:
                 letra_escolhida = None
-            correto = (letra_escolhida == q_row["correta_text"])
-            answered = True
+            is_correct = (letra_escolhida == q_row["correta_text"])
+            st.session_state[answered_key] = True
+            st.session_state[result_key] = is_correct
+            save_resposta(parent_qid, qid, is_correct)
 
-    if answered:
-        if correto:
+    # Feedback imediato
+    if st.session_state.get(answered_key):
+        if st.session_state.get(result_key):
             st.success("✅ Correto!")
         else:
             st.error("❌ Incorreto.")
@@ -426,30 +391,31 @@ def render_questao(q_row, show_favorito=True, record=False, parent_qid=None):
             with st.expander("Ver explicação"):
                 st.write(q_row["explicacao"])
 
-        if record and parent_qid is not None:
-            save_resposta(parent_qid, qid, bool(correto))
-
-    if show_favorito:
-        addfav = st.button("⭐ Salvar nos Favoritos", key=f"fav_{qid}")
-        if addfav:
-            if duplicar_questao_para_favoritos(qid):
-                st.toast("Adicionada em 'Favoritos'.")
-            else:
-                st.warning("Não foi possível adicionar aos favoritos.")
+    # Favoritar
+    if st.button("⭐ Salvar nos Favoritos", key=f"fav_{qid}"):
+        if duplicar_questao_para_favoritos(qid):
+            st.toast("Adicionada em 'Favoritos'.")
 
     st.divider()
-    return answered, correto
 
 def page_praticar():
     st.title("🎯 Praticar")
     qs = get_questionarios()
     nomes = {q["nome"]: q["id"] for q in qs}
-    escolha = st.selectbox("Selecione um questionário", ["(Selecione)"] + list(nomes.keys()),
-                           index= list(nomes.keys()).index(next((n for n in nomes if n != "Favoritos"), list(nomes.keys())[0]))+1 if nomes else 0)
-    if escolha == "(Selecione)":
-        return
+    default_id = st.session_state.get("current_qid")
+    default_name = None
+    if default_id:
+        for name, _id in nomes.items():
+            if _id == default_id:
+                default_name = name
+                break
 
+    escolha = st.selectbox("Selecione um questionário", list(nomes.keys()), index=(list(nomes.keys()).index(default_name) if default_name in nomes else 0))
     qid = nomes[escolha]
+    st.session_state["current_qid"] = qid
+
+    # Cabeçalho de desempenho (antes e depois)
+    st.subheader("Desempenho")
     show_desempenho_block(qid)
 
     # Estado de navegação
@@ -464,17 +430,34 @@ def page_praticar():
         if st.button("Reiniciar"):
             st.session_state[key_pool] = [r["id"] for r in get_questoes(qid)]
             random.shuffle(st.session_state[key_pool])
+            # limpa flags de respostas
+            for k in list(st.session_state.keys()):
+                if k.startswith("answered_") or k.startswith("result_"):
+                    del st.session_state[k]
             st.rerun()
         return
 
-    # Pega a próxima
-    next_id = pool.pop()
+    # Carrega questão atual sem removê-la ainda
+    current_qid = pool[-1]
     with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT * FROM questoes WHERE id = ?;", (next_id,))
+        c.execute("SELECT * FROM questoes WHERE id = ?;", (current_qid,))
         row = c.fetchone()
 
-    answered, correto = render_questao(row, show_favorito=True, record=True, parent_qid=qid)
+    render_questao(row, parent_qid=qid)
+
+    # Mostrar desempenho atualizado imediatamente (sem precisar mudar de pergunta)
+    st.subheader("Desempenho (atualizado)")
+    show_desempenho_block(qid)
+
+    # Próxima questão só quando o usuário clicar
+    if st.button("Próxima questão ▶"):
+        # avança e limpa flags desta questão
+        pool.pop()
+        for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.rerun()
 
 def page_gerenciar():
     st.title("🧰 Gerenciar Questionário")
@@ -483,8 +466,16 @@ def page_gerenciar():
         st.info("Nenhum questionário cadastrado.")
         return
     nomes = {q["nome"]: q["id"] for q in qs}
-    escolha = st.selectbox("Selecione um questionário", list(nomes.keys()))
+    default_id = st.session_state.get("current_qid")
+    default_name = None
+    if default_id:
+        for name, _id in nomes.items():
+            if _id == default_id:
+                default_name = name
+                break
+    escolha = st.selectbox("Selecione um questionário", list(nomes.keys()), index=(list(nomes.keys()).index(default_name) if default_name in nomes else 0))
     qid = nomes[escolha]
+    st.session_state["current_qid"] = qid
 
     show_desempenho_block(qid)
     st.subheader("Questões")
@@ -518,7 +509,7 @@ def page_importar():
         st.code(TEMPLATE_DOC, language="text")
 
     up = st.file_uploader("Enviar arquivo CSV", type=["csv"])
-    txt = st.text_area("... ou cole aqui o conteúdo do CSV", height=180, placeholder="tipo,questionario,texto,correta,explicacao,alternativas\n...")
+    txt = st.text_area("... ou cole aqui o conteúdo do CSV", height=180, placeholder="tipo,questionario,texto,correta,explicacao,alternativas\\n...")
     if st.button("Importar"):
         try:
             if up is not None:
@@ -562,6 +553,7 @@ def page_simulado():
         st.session_state["simulado_pool"] = [dict(r) for r in get_random_questoes(qids, n)]
         st.session_state["simulado_idx"] = 0
         st.session_state["simulado_acertos"] = 0
+        st.session_state["nav_choice"] = "Simulados"
         st.session_state["mode"] = "run_simulado"
         st.rerun()
 
@@ -576,17 +568,56 @@ def page_run_simulado():
         perc = (acertos/total)*100 if total else 0
         st.success(f"Fim do simulado! Acertos: {acertos}/{total} ({perc:.1f}%).")
         if st.button("Voltar aos simulados"):
-            st.session_state["mode"] = "simulados"
+            st.session_state["mode"] = None
+            st.session_state["nav_choice"] = "Simulados"
             st.rerun()
         return
 
     q = pool[idx]
     st.info(f"Questão {idx+1} de {len(pool)}")
-    answered, correto = render_questao(q, show_favorito=True, record=False, parent_qid=None)
-    if answered:
-        if correto:
+
+    # Reuso do render com lógica instantânea e sem salvar no questionário 'simulado'
+    # Aqui não gravamos em respostas (para não contaminar métricas dos questionários originais)
+    qid = q["id"]
+    tipo = q["tipo"]
+    st.markdown(f"#### Q{qid} – {q['texto']}")
+
+    answered_key = f"answered_sim_{qid}"
+    result_key = f"result_sim_{qid}"
+
+    if tipo == "VF":
+        escolha = st.radio("Sua resposta", ["Verdadeiro", "Falso"], key=f"vf_sim_{qid}")
+        if answered_key not in st.session_state and escolha:
+            gabarito = (q["correta_text"] == "V")
+            user = (escolha == "Verdadeiro")
+            st.session_state[answered_key] = True
+            st.session_state[result_key] = (gabarito == user)
+    else:
+        alternativas = [q["op_a"], q["op_b"], q["op_c"], q["op_d"], q["op_e"]]
+        letras = ["A","B","C","D","E"]
+        opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
+        labels = [f"{letra}) {alt}" for letra, alt in opts]
+        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_sim_{qid}")
+        if answered_key not in st.session_state and escolha:
+            letra_escolhida = escolha.split(")")[0]
+            st.session_state[answered_key] = True
+            st.session_state[result_key] = (letra_escolhida == q["correta_text"])
+
+    if st.session_state.get(answered_key):
+        if st.session_state.get(result_key):
+            st.success("✅ Correto!")
             st.session_state["simulado_acertos"] = acertos + 1
+        else:
+            st.error("❌ Incorreto.")
+        if q.get("explicacao"):
+            with st.expander("Ver explicação"):
+                st.write(q["explicacao"])
+
+    if st.button("Próxima ▶"):
         st.session_state["simulado_idx"] = idx + 1
+        for k in [answered_key, result_key, f"vf_sim_{qid}", f"mc_sim_{qid}"]:
+            if k in st.session_state:
+                del st.session_state[k]
         st.rerun()
 
 # =============================
@@ -595,12 +626,11 @@ def page_run_simulado():
 def main():
     init_db()
 
-    # Sidebar
+    # Sidebar com estado controlado
     with st.sidebar:
         st.header("Navegação")
-        choice = st.radio("Ir para", ["Painel", "Praticar", "Gerenciar", "Importar CSV", "Simulados"])
-
-    st.session_state.setdefault("mode", None)
+        st.session_state.setdefault("nav_choice", "Painel")
+        choice = st.radio("Ir para", ["Painel", "Praticar", "Gerenciar", "Importar CSV", "Simulados"], key="nav_choice")
 
     if choice == "Painel":
         page_dashboard()
@@ -614,7 +644,6 @@ def main():
         if st.session_state.get("mode") == "run_simulado":
             page_run_simulado()
         else:
-            st.session_state["mode"] = "simulados"
             page_simulado()
 
 if __name__ == "__main__":
