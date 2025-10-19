@@ -284,6 +284,53 @@ def update_questao_explicacao(questao_id, texto_exp):
     db = get_db()
     db.questoes.update_one({"_id": ObjectId(questao_id)}, {"$set": {"explicacao": texto_exp}})
 
+def popular_caderno_erros():
+    """Popula o Caderno de Erros com questões já respondidas incorretamente"""
+    db = get_db()
+    
+    # Garante que existe o Caderno de Erros
+    erros = db.questionarios.find_one({"nome": "Caderno de Erros"})
+    if not erros:
+        init_db()
+        erros = db.questionarios.find_one({"nome": "Caderno de Erros"})
+    
+    # Busca todas as respostas
+    respostas = list(db.respostas.find({}))
+    
+    # Mapeia última resposta de cada questão
+    last_map = _last_correct_map(respostas)
+    
+    # Para cada questão respondida incorretamente (última resposta errada)
+    adicionadas = 0
+    for questao_id_str, correto in last_map.items():
+        if not correto:  # Se a última resposta foi errada
+            questao = db.questoes.find_one({"_id": ObjectId(questao_id_str)})
+            if questao:
+                # Verifica se já existe no Caderno de Erros
+                existe = db.questoes.find_one({
+                    "questionario_id": erros["_id"],
+                    "texto": questao["texto"]
+                })
+                
+                if not existe:
+                    # Adiciona ao Caderno de Erros
+                    db.questoes.insert_one({
+                        "questionario_id": erros["_id"],
+                        "tipo": questao["tipo"],
+                        "texto": questao["texto"],
+                        "explicacao": questao.get("explicacao", ""),
+                        "correta_text": questao["correta_text"],
+                        "op_a": questao.get("op_a"),
+                        "op_b": questao.get("op_b"),
+                        "op_c": questao.get("op_c"),
+                        "op_d": questao.get("op_d"),
+                        "op_e": questao.get("op_e"),
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    })
+                    adicionadas += 1
+    
+    return adicionadas
+
 # =============================
 # CSV Import
 # =============================
@@ -470,6 +517,16 @@ def render_questao(q_row, parent_qid, questao_numero=None):
 
 def page_dashboard():
     st.title("📚 Painel de Questionários")
+    # Botão para popular Caderno de Erros com histórico
+    if st.button("📔 Atualizar Caderno de Erros com histórico"):
+        with st.spinner("Analisando respostas anteriores..."):
+            n = popular_caderno_erros()
+            if n > 0:
+                st.success(f"✅ {n} questões erradas adicionadas ao Caderno de Erros!")
+            else:
+                st.info("Nenhuma questão nova para adicionar.")
+    
+    st.divider()
     qs = get_questionarios()
     if not qs:
         st.info("Nenhum questionário cadastrado ainda. Vá em **Importar CSV** para começar.")
