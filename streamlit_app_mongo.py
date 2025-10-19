@@ -74,6 +74,13 @@ def init_db():
                 "descricao": "Questões salvas como favoritas.",
                 "created_at": datetime.now(timezone.utc).isoformat()
             })
+        # Garante existência do questionário "Caderno de Erros"
+        if db.questionarios.count_documents({"nome": "Caderno de Erros"}, limit=1) == 0:
+            db.questionarios.insert_one({
+                "nome": "Caderno de Erros",
+                "descricao": "Questões respondidas incorretamente.",
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
     except Exception as e:
         # Silencia erros de índice já existente
         pass
@@ -243,6 +250,36 @@ def duplicar_questao_para_favoritos(questao_id):
     })
     return True
 
+def duplicar_questao_para_erros(questao_id):
+    db = get_db()
+    erros = db.questionarios.find_one({"nome":"Caderno de Erros"})
+    if not erros:
+        init_db()
+        erros = db.questionarios.find_one({"nome":"Caderno de Erros"})
+    d = db.questoes.find_one({"_id": ObjectId(questao_id)})
+    if not d:
+        return False
+    
+    # Verifica se já existe para evitar duplicatas
+    existe = db.questoes.find_one({
+        "questionario_id": erros["_id"],
+        "texto": d["texto"]
+    })
+    if existe:
+        return False
+    
+    db.questoes.insert_one({
+        "questionario_id": erros["_id"],
+        "tipo": d["tipo"],
+        "texto": d["texto"],
+        "explicacao": d.get("explicacao",""),
+        "correta_text": d["correta_text"],
+        "op_a": d.get("op_a"), "op_b": d.get("op_b"), "op_c": d.get("op_c"),
+        "op_d": d.get("op_d"), "op_e": d.get("op_e"),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    return True
+
 def update_questao_explicacao(questao_id, texto_exp):
     db = get_db()
     db.questoes.update_one({"_id": ObjectId(questao_id)}, {"$set": {"explicacao": texto_exp}})
@@ -259,7 +296,7 @@ Colunas mínimas (ordem livre, cabeçalho obrigatório):
 - texto               -> enunciado da questão
 - correta             -> VF: 'V', 'F', 'True', 'False'; MC: 'A'..'E' OU o texto exato da alternativa correta
 - explicacao          -> (opcional)
-- alternativas        -> (apenas MC) string com alternativas separadas por ';' ou '|', na ordem A..E
+- alternativas        -> (apenas MC) string com alternativas separadas por '@@', na ordem A..E
 """
 
 def normalize_bool(val):
@@ -391,6 +428,9 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
             save_resposta(parent_qid, qid, is_correct)
+            # Adiciona ao Caderno de Erros se errou
+        if not is_correct:
+            duplicar_questao_para_erros(qid)
     else:
         alternativas = [q_row["op_a"], q_row["op_b"], q_row["op_c"], q_row["op_d"], q_row["op_e"]]
         letras = ["A","B","C","D","E"]
@@ -403,6 +443,9 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
             save_resposta(parent_qid, qid, is_correct)
+             # Adiciona ao Caderno de Erros se errou
+        if not is_correct:
+            duplicar_questao_para_erros(qid)
 
     # Feedback + Explicação
     with st.expander("Ver explicação / editar"):
