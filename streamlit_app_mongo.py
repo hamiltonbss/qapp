@@ -369,6 +369,12 @@ def ensure_questionario(nome):
         return q["id"]
     return add_questionario(nome, "")
 
+def processar_texto(texto):
+    """Converte \\n em quebras de linha reais"""
+    if texto:
+        return str(texto).replace('\\n', '\n')
+    return texto
+
 def import_csv_to_db(filelike_or_str):
     import io, csv
     if hasattr(filelike_or_str, "read"):
@@ -396,9 +402,9 @@ def import_csv_to_db(filelike_or_str):
         try:
             tipo = str(row.get("tipo","")).strip().upper()
             questionario = row.get("questionario","").strip() or "Sem Título"
-            texto = row.get("texto","").strip()
+            texto = processar_texto(row.get("texto","").strip())
             correta = row.get("correta","").strip()
-            explicacao = row.get("explicacao","") or ""
+            explicacao = processar_texto(row.get("explicacao","") or "")
 
             if not texto:
                 raise ValueError("Texto da questão vazio.")
@@ -410,7 +416,8 @@ def import_csv_to_db(filelike_or_str):
                 add_questao_vf(qid, texto, val, explicacao)
                 ok += 1
             elif tipo == "MC":
-                alternativas = parse_alternativas(row.get("alternativas",""))
+                alternativas_raw = parse_alternativas(row.get("alternativas",""))
+                alternativas = [processar_texto(alt) for alt in alternativas_raw]
                 if len(alternativas) < 2:
                     raise ValueError("Questão MC requer ao menos 2 alternativas.")
                 add_questao_mc(qid, texto, alternativas, correta, explicacao)
