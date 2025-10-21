@@ -456,14 +456,15 @@ def render_questao(q_row, parent_qid, questao_numero=None):
     qid = q_row["id"]
     tipo = q_row["tipo"]
     
+    # IMPORTANTE: Define as keys logo no início
+    answered_key = f"answered_{qid}"
+    result_key = f"result_{qid}"
+    
     # Exibe número da questão se fornecido
     if questao_numero:
         st.markdown(f"#### Questão {questao_numero}")
     
     st.markdown(f"**{q_row['texto']}**")
-
-    answered_key = f"answered_{qid}"
-    result_key = f"result_{qid}"
 
     if tipo == "VF":
         vf_options = ["— Selecione —", "Verdadeiro", "Falso"]
@@ -476,8 +477,8 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.session_state[result_key] = is_correct
             save_resposta(parent_qid, qid, is_correct)
             # Adiciona ao Caderno de Erros se errou
-        if not is_correct:
-            duplicar_questao_para_erros(qid)
+            if not is_correct:
+                duplicar_questao_para_erros(qid)
     else:
         alternativas = [q_row["op_a"], q_row["op_b"], q_row["op_c"], q_row["op_d"], q_row["op_e"]]
         letras = ["A","B","C","D","E"]
@@ -490,14 +491,25 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
             save_resposta(parent_qid, qid, is_correct)
-             # Adiciona ao Caderno de Erros se errou
-        if not is_correct:
-            duplicar_questao_para_erros(qid)
+            # Adiciona ao Caderno de Erros se errou
+            if not is_correct:
+                duplicar_questao_para_erros(qid)
 
     # Feedback + Explicação
     with st.expander("Ver explicação / editar"):
+        # Editor do enunciado
+        txt_key = f"txt_{qid}"
+        new_txt = st.text_area("Enunciado da questão:", value=q_row.get("texto",""), key=txt_key, height=100)
+        if st.button("Salvar enunciado", key=f"save_txt_{qid}"):
+            update_questao_texto(qid, new_txt)
+            st.toast("Enunciado atualizado.")
+            st.rerun()
+        
+        st.divider()
+        
+        # Editor da explicação
         exp_key = f"exp_{qid}"
-        new_exp = st.text_area("Texto da explicação (salvo no banco):", value=q_row.get("explicacao",""), key=exp_key, height=160)
+        new_exp = st.text_area("Texto da explicação:", value=q_row.get("explicacao",""), key=exp_key, height=160)
         if st.button("Salvar explicação", key=f"save_exp_{qid}"):
             update_questao_explicacao(qid, new_exp)
             st.toast("Explicação atualizada.")
