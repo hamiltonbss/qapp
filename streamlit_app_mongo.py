@@ -504,16 +504,7 @@ def render_questao(q_row, parent_qid, questao_numero=None):
 
     # Feedback + Explicação
     with st.expander("Ver explicação / editar"):
-        # Editor do enunciado
-        txt_key = f"txt_{qid}"
-        new_txt = st.text_area("Enunciado da questão:", value=q_row.get("texto",""), key=txt_key, height=100)
-        if st.button("Salvar enunciado", key=f"save_txt_{qid}"):
-            update_questao_texto(qid, new_txt)
-            st.toast("Enunciado atualizado.")
-            st.rerun()
-        
-        st.divider()
-        
+             
         # Editor da explicação
         exp_key = f"exp_{qid}"
         new_exp = st.text_area("Texto da explicação:", value=q_row.get("explicacao",""), key=exp_key, height=160)
