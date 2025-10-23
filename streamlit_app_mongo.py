@@ -502,12 +502,16 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             if not is_correct:
                 duplicar_questao_para_erros(qid)
 
-    # Feedback + Explicação
+   # Feedback + Explicação
     with st.expander("Ver explicação / editar"):
-             
-        # Editor da explicação
         exp_key = f"exp_{qid}"
-        new_exp = st.text_area("Texto da explicação:", value=q_row.get("explicacao",""), key=exp_key, height=160)
+        explicacao_atual = q_row.get("explicacao","")
+        
+        # Calcula altura baseada no número de linhas (mínimo 100, máximo 500)
+        num_linhas = explicacao_atual.count('\n') + 1
+        altura = max(100, min(500, num_linhas * 25 + 50))
+        
+        new_exp = st.text_area("Texto da explicação:", value=explicacao_atual, key=exp_key, height=altura)
         if st.button("Salvar explicação", key=f"save_exp_{qid}"):
             update_questao_explicacao(qid, new_exp)
             st.toast("Explicação atualizada.")
