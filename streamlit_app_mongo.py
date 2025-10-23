@@ -503,7 +503,7 @@ def render_questao(q_row, parent_qid, questao_numero=None):
                 duplicar_questao_para_erros(qid)
 
    # Feedback + Explicação
-    with st.expander("Ver explicação / editar"):
+    with st.expander("Ver explicação / editar", expanded=False):
         exp_key = f"exp_{qid}"
         explicacao_atual = q_row.get("explicacao","")
         
