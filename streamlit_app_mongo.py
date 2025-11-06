@@ -41,12 +41,10 @@ def connection_status():
             st.error("MONGO_URI não definido em Secrets/Env.")
             return False
         try:
-            # Usa o cliente cacheado
             client = get_mongo_client()
             if client is None:
                 st.error("Cliente MongoDB não disponível")
                 return False
-            # Ping simplificado
             client.admin.command("ping")
             st.success("MongoDB conectado ✅")
             return True
@@ -58,36 +56,48 @@ def connection_status():
 # Database helpers (otimizado)
 # =============================
 def init_db():
-    """Inicializa índices e questionário Favoritos (executado apenas uma vez)"""
+    """Inicializa índices e questionários especiais (executado apenas uma vez)"""
     db = get_db()
     try:
-        # Cria índices se não existirem (operação idempotente)
+        # Índices
         db.questionarios.create_index([("nome", ASCENDING)], name="uq_nome", unique=True, background=True)
+        db.questionarios.create_index([("disciplina", ASCENDING), ("nome", ASCENDING)], name="idx_disciplina_nome", background=True)
         db.questoes.create_index([("questionario_id", ASCENDING)], background=True)
         db.respostas.create_index([("questionario_id", ASCENDING)], background=True)
         db.respostas.create_index([("questao_id", ASCENDING)], background=True)
-        
-        # Garante existência do questionário "Favoritos"
+
+        # Garante existência dos cadernos especiais (com disciplina do sistema)
         if db.questionarios.count_documents({"nome": "Favoritos"}, limit=1) == 0:
             db.questionarios.insert_one({
                 "nome": "Favoritos",
                 "descricao": "Questões salvas como favoritas.",
+                "disciplina": "— Sistema —",
                 "created_at": datetime.now(timezone.utc).isoformat()
             })
-        # Garante existência do questionário "Caderno de Erros"
         if db.questionarios.count_documents({"nome": "Caderno de Erros"}, limit=1) == 0:
             db.questionarios.insert_one({
                 "nome": "Caderno de Erros",
                 "descricao": "Questões respondidas incorretamente.",
+                "disciplina": "— Sistema —",
                 "created_at": datetime.now(timezone.utc).isoformat()
             })
-    except Exception as e:
+        # Atualiza documentos antigos sem 'disciplina'
+        db.questionarios.update_many(
+            {"disciplina": {"$exists": False}},
+            {"$set": {"disciplina": "Sem Disciplina"}}
+        )
+    except Exception:
         # Silencia erros de índice já existente
         pass
 
 def _doc_to_row_q(q):
     """Converte questionário Mongo -> dict (id:str)."""
-    return {"id": str(q["_id"]), "nome": q.get("nome",""), "descricao": q.get("descricao","")}
+    return {
+        "id": str(q["_id"]),
+        "nome": q.get("nome",""),
+        "descricao": q.get("descricao",""),
+        "disciplina": q.get("disciplina", "Sem Disciplina")
+    }
 
 def _doc_to_row_questao(d):
     return {
@@ -110,27 +120,51 @@ def _doc_to_row_questao(d):
 def get_questionarios():
     db = get_db()
     try:
-        cur = db.questionarios.find({}).sort("nome", ASCENDING)
+        cur = db.questionarios.find({}).sort([("disciplina", ASCENDING), ("nome", ASCENDING)])
         return [_doc_to_row_q(x) for x in cur]
     except Exception as e:
         st.error(f"[get_questionarios] erro: {e}")
         return []
+
+def get_all_disciplinas():
+    """Lista de disciplinas existentes (ordenadas)"""
+    db = get_db()
+    try:
+        vals = db.questionarios.distinct("disciplina")
+        vals = [v or "Sem Disciplina" for v in vals]
+        # Garante ordenação, com '— Sistema —' no fim
+        base = sorted([v for v in vals if v != "— Sistema —" and v is not None])
+        if "— Sistema —" in vals:
+            base.append("— Sistema —")
+        return base or ["Sem Disciplina"]
+    except Exception:
+        return ["Sem Disciplina"]
 
 def get_questionario_by_name(name):
     db = get_db()
     q = db.questionarios.find_one({"nome": name})
     return _doc_to_row_q(q) if q else None
 
-def add_questionario(nome, descricao=""):
+def add_questionario(nome, descricao="", disciplina="Sem Disciplina"):
     db = get_db()
     res = db.questionarios.insert_one({
         "nome": nome,
         "descricao": descricao,
+        "disciplina": disciplina or "Sem Disciplina",
         "created_at": datetime.now(timezone.utc).isoformat()
     })
-    # Limpa cache
     get_questionarios.clear()
     return str(res.inserted_id)
+
+def update_questionario_disciplina(qid, disciplina):
+    db = get_db()
+    db.questionarios.update_one({"_id": ObjectId(qid)}, {"$set": {"disciplina": disciplina or "Sem Disciplina"}})
+    get_questionarios.clear()
+
+def update_questionario_descricao(qid, descricao):
+    db = get_db()
+    db.questionarios.update_one({"_id": ObjectId(qid)}, {"$set": {"descricao": descricao or ""}})
+    get_questionarios.clear()
 
 def delete_questionario(qid):
     db = get_db()
@@ -138,8 +172,20 @@ def delete_questionario(qid):
     db.questoes.delete_many({"questionario_id": oid})
     db.respostas.delete_many({"questionario_id": oid})
     db.questionarios.delete_one({"_id": oid})
-    # Limpa cache
     get_questionarios.clear()
+
+def resetar_resolucoes(qid):
+    """Remove histórico de respostas para o questionário e reinicia sessão atual."""
+    db = get_db()
+    oid = ObjectId(qid)
+    db.respostas.delete_many({"questionario_id": oid})
+    # Limpa chaves de estado relacionadas
+    keys_to_del = [k for k in st.session_state.keys() if any(
+        k.startswith(prefix) for prefix in ("answered_", "result_", "vf_", "mc_", f"pool_{qid}")
+    )]
+    for k in keys_to_del:
+        del st.session_state[k]
+    st.toast("Resoluções resetadas para este questionário.")
 
 def add_questao_vf(questionario_id, texto, correta, explicacao=""):
     correta_text = "V" if bool(correta) else "F"
@@ -260,7 +306,6 @@ def duplicar_questao_para_erros(questao_id):
     if not d:
         return False
     
-    # Verifica se já existe para evitar duplicatas
     existe = db.questoes.find_one({
         "questionario_id": erros["_id"],
         "texto": d["texto"]
@@ -287,33 +332,22 @@ def update_questao_explicacao(questao_id, texto_exp):
 def popular_caderno_erros():
     """Popula o Caderno de Erros com questões já respondidas incorretamente"""
     db = get_db()
-    
-    # Garante que existe o Caderno de Erros
     erros = db.questionarios.find_one({"nome": "Caderno de Erros"})
     if not erros:
         init_db()
         erros = db.questionarios.find_one({"nome": "Caderno de Erros"})
-    
-    # Busca todas as respostas
     respostas = list(db.respostas.find({}))
-    
-    # Mapeia última resposta de cada questão
     last_map = _last_correct_map(respostas)
-    
-    # Para cada questão respondida incorretamente (última resposta errada)
     adicionadas = 0
     for questao_id_str, correto in last_map.items():
-        if not correto:  # Se a última resposta foi errada
+        if not correto:
             questao = db.questoes.find_one({"_id": ObjectId(questao_id_str)})
             if questao:
-                # Verifica se já existe no Caderno de Erros
                 existe = db.questoes.find_one({
                     "questionario_id": erros["_id"],
                     "texto": questao["texto"]
                 })
-                
                 if not existe:
-                    # Adiciona ao Caderno de Erros
                     db.questoes.insert_one({
                         "questionario_id": erros["_id"],
                         "tipo": questao["tipo"],
@@ -328,7 +362,6 @@ def popular_caderno_erros():
                         "created_at": datetime.now(timezone.utc).isoformat()
                     })
                     adicionadas += 1
-    
     return adicionadas
 
 # =============================
@@ -344,6 +377,7 @@ Colunas mínimas (ordem livre, cabeçalho obrigatório):
 - correta             -> VF: 'V', 'F', 'True', 'False'; MC: 'A'..'E' OU o texto exato da alternativa correta
 - explicacao          -> (opcional)
 - alternativas        -> (apenas MC) string com alternativas separadas por '@@', na ordem A..E
+- disciplina          -> (opcional) nome da disciplina para classificar o questionário
 """
 
 def normalize_bool(val):
@@ -356,18 +390,18 @@ def parse_alternativas(val):
     if val is None:
         return []
     s = str(val).strip()
-    # Usa APENAS @@ como separador
     parts = [p.strip() for p in s.split("@@") if p.strip()]
     if len(parts) > 5:
         parts = parts[:5]
     return parts
 
-def ensure_questionario(nome):
+def ensure_questionario(nome, disciplina="Sem Disciplina"):
     nome = str(nome).strip() or "Sem Título"
     q = get_questionario_by_name(nome)
-    if q: 
+    if q:
+        # Se já existe mas sem disciplina setada, não mexe; se quiser reclassificar, faz pela UI
         return q["id"]
-    return add_questionario(nome, "")
+    return add_questionario(nome, "", disciplina=disciplina)
 
 def processar_texto(texto):
     """Converte \\n em quebras de linha reais"""
@@ -402,6 +436,7 @@ def import_csv_to_db(filelike_or_str):
         try:
             tipo = str(row.get("tipo","")).strip().upper()
             questionario = row.get("questionario","").strip() or "Sem Título"
+            disciplina_csv = (row.get("disciplina") or "").strip() or "Sem Disciplina"
             texto = processar_texto(row.get("texto","").strip())
             correta = row.get("correta","").strip()
             explicacao = processar_texto(row.get("explicacao","") or "")
@@ -409,7 +444,7 @@ def import_csv_to_db(filelike_or_str):
             if not texto:
                 raise ValueError("Texto da questão vazio.")
 
-            qid = ensure_questionario(questionario)
+            qid = ensure_questionario(questionario, disciplina_csv)
 
             if tipo == "VF":
                 val = normalize_bool(correta)
@@ -427,7 +462,6 @@ def import_csv_to_db(filelike_or_str):
         except Exception as e:
             erros.append(f"Linha {i}: {e}")
 
-    # Limpa cache após importação
     get_questionarios.clear()
     return ok, erros
 
@@ -462,15 +496,10 @@ def show_desempenho_block(qid, show_respondidas=False):
 def render_questao(q_row, parent_qid, questao_numero=None):
     qid = q_row["id"]
     tipo = q_row["tipo"]
-    
-    # IMPORTANTE: Define as keys logo no início
     answered_key = f"answered_{qid}"
     result_key = f"result_{qid}"
-    
-    # Exibe número da questão se fornecido
     if questao_numero:
         st.markdown(f"#### Questão {questao_numero}")
-    
     st.markdown(f"**{q_row['texto']}**")
 
     if tipo == "VF":
@@ -483,7 +512,6 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
             save_resposta(parent_qid, qid, is_correct)
-            # Adiciona ao Caderno de Erros se errou
             if not is_correct:
                 duplicar_questao_para_erros(qid)
     else:
@@ -498,19 +526,14 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
             save_resposta(parent_qid, qid, is_correct)
-            # Adiciona ao Caderno de Erros se errou
             if not is_correct:
                 duplicar_questao_para_erros(qid)
 
-   # Feedback + Explicação
     with st.expander("Ver explicação / editar", expanded=False):
         exp_key = f"exp_{qid}"
         explicacao_atual = q_row.get("explicacao","")
-        
-        # Calcula altura baseada no número de linhas (mínimo 100, máximo 500)
         num_linhas = explicacao_atual.count('\n') + 1
         altura = max(100, min(500, num_linhas * 25 + 50))
-        
         new_exp = st.text_area("Texto da explicação:", value=explicacao_atual, key=exp_key, height=altura)
         if st.button("Salvar explicação", key=f"save_exp_{qid}"):
             update_questao_explicacao(qid, new_exp)
@@ -521,17 +544,13 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.success("✅ Correto!")
         else:
             st.error(f"❌ Incorreto. Gabarito: {q_row['correta_text']}")
-
-    # Favoritar
     if st.button("⭐ Salvar nos Favoritos", key=f"fav_{qid}"):
         if duplicar_questao_para_favoritos(qid):
             st.toast("Adicionada em 'Favoritos'.")
-
     st.divider()
 
 def page_dashboard():
-    st.title("📚 Painel de Questionários")
-    # Botão para popular Caderno de Erros com histórico
+    st.title("📚 Painel de Questionários (Agrupado por Disciplina)")
     if st.button("📔 Atualizar Caderno de Erros com histórico"):
         with st.spinner("Analisando respostas anteriores..."):
             n = popular_caderno_erros()
@@ -539,46 +558,57 @@ def page_dashboard():
                 st.success(f"✅ {n} questões erradas adicionadas ao Caderno de Erros!")
             else:
                 st.info("Nenhuma questão nova para adicionar.")
-    
     st.divider()
-    qs = get_questionarios()
+
+    qs = [q for q in get_questionarios() if q["nome"] != "Caderno de Erros" and q["nome"] != "Favoritos"]
     if not qs:
         st.info("Nenhum questionário cadastrado ainda. Vá em **Importar CSV** para começar.")
         return
 
-    filtro = st.text_input("🔎 Buscar por nome")
-    cols = st.columns(2)
-    slot = 0
+    filtro_global = st.text_input("🔎 Buscar por nome de questionário (filtra dentro dos dropdowns)")
+
+    # Agrupa por disciplina
+    grupos = {}
     for q in qs:
-        if filtro and filtro.lower() not in q["nome"].lower():
-            continue
-        with cols[slot % 2]:
-            with st.container(border=True):
-                st.subheader(q["nome"])
-                if q["descricao"]:
-                    st.caption(q["descricao"])
-                show_desempenho_block(q["id"])
-                b1, b2, b3 = st.columns(3)
+        grupos.setdefault(q["disciplina"] or "Sem Disciplina", []).append(q)
+
+    # Render: um card por disciplina, com dropdown de questionários
+    for disc, items in sorted(grupos.items()):
+        with st.container(border=True):
+            st.subheader(f"📦 {disc}")
+            nomes_validos = [i["nome"] for i in items if (not filtro_global or filtro_global.lower() in i["nome"].lower())]
+            if not nomes_validos:
+                st.caption("Nenhum questionário correspondente ao filtro.")
+                continue
+            sel = st.selectbox(f"Selecione um questionário de {disc}", nomes_validos, key=f"sel_{disc}")
+            escolhido = next((x for x in items if x["nome"] == sel), None)
+            if escolhido:
+                show_desempenho_block(escolhido["id"])
+                b1, b2, b3, b4 = st.columns(4)
                 with b1:
-                    if st.button("Praticar", key=f"pr_{q['id']}"):
-                        st.session_state["current_qid"] = q["id"]
+                    if st.button("Praticar", key=f"pr_{escolhido['id']}"):
+                        st.session_state["current_qid"] = escolhido["id"]
                         st.session_state["go_to"] = "Praticar"
                         st.rerun()
                 with b2:
-                    if q["nome"] != "Favoritos" and st.button("Excluir", key=f"del_{q['id']}"):
-                        delete_questionario(q["id"])
-                        st.success(f"Questionário '{q['nome']}' excluído.")
-                        st.rerun()
-                with b3:
-                    if st.button("Ver questões", key=f"ver_{q['id']}"):
-                        st.session_state["current_qid"] = q["id"]
+                    if st.button("Gerenciar", key=f"ger_{escolhido['id']}"):
+                        st.session_state["current_qid"] = escolhido["id"]
                         st.session_state["go_to"] = "Gerenciar"
                         st.rerun()
-        slot += 1
+                with b3:
+                    if st.button("Resetar resoluções", key=f"reset_{escolhido['id']}"):
+                        resetar_resolucoes(escolhido["id"])
+                        st.rerun()
+                with b4:
+                    if st.button("Excluir", key=f"del_{escolhido['id']}"):
+                        delete_questionario(escolhido["id"])
+                        st.success(f"Questionário '{escolhido['nome']}' excluído.")
+                        st.rerun()
 
 def page_praticar():
     st.title("🎯 Praticar")
     qs = get_questionarios()
+    qs = [q for q in qs if q["nome"] != "Caderno de Erros"]  # pode praticar Favoritos
     if not qs:
         st.info("Nenhum questionário cadastrado.")
         return
@@ -595,6 +625,15 @@ def page_praticar():
     qid = nomes[escolha]
     st.session_state["current_qid"] = qid
 
+    # Ações rápidas
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔄 Resetar resoluções deste questionário"):
+            resetar_resolucoes(qid)
+            st.rerun()
+    with c2:
+        st.caption("O reset remove apenas o histórico de respostas. As questões permanecem.")
+
     # Cabeçalho de desempenho
     st.subheader("Desempenho")
     show_desempenho_block(qid, show_respondidas=True)
@@ -607,25 +646,14 @@ def page_praticar():
 
     pool = st.session_state[key_pool]
     if not pool:
-        st.info("Acabaram as questões! Clique abaixo para reiniciar.")
-        if st.button("Reiniciar"):
-            st.session_state[key_pool] = [r["id"] for r in get_questoes(qid)]
-            random.shuffle(st.session_state[key_pool])
-            for k in list(st.session_state.keys()):
-                if k.startswith("answered_") or k.startswith("result_"):
-                    del st.session_state[k]
-            st.rerun()
+        st.info("Acabaram as questões! Você pode **resetar resoluções** para reiniciar.")
         return
 
-    # Carrega questão atual
     current_qid = pool[-1]
     row = get_questao_by_id(current_qid)
-    
-    # Calcula número da questão (total - restantes + 1)
     total_questoes = len(get_questoes(qid))
     questao_numero = total_questoes - len(pool) + 1
-  
-    # Botão próxima questão (topo)
+
     if st.button("Próxima questão ▶", key="next_top"):
         pool.pop()
         for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
@@ -635,11 +663,9 @@ def page_praticar():
         
     render_questao(row, parent_qid=qid, questao_numero=questao_numero)
 
-    # Mostrar desempenho atualizado
     st.subheader("Desempenho (atualizado)")
     show_desempenho_block(qid, show_respondidas=True)
 
-    # Próxima questão
     if st.button("Próxima questão ▶"):
         pool.pop()
         for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
@@ -664,6 +690,40 @@ def page_gerenciar():
     escolha = st.selectbox("Selecione um questionário", list(nomes.keys()), index=(list(nomes.keys()).index(default_name) if default_name in nomes else 0))
     qid = nomes[escolha]
     st.session_state["current_qid"] = qid
+
+    # Metadados editáveis: Disciplina e Descrição
+    qinfo = next((q for q in get_questionarios() if q["id"] == qid), None)
+    if qinfo:
+        st.markdown("### Metadados")
+        col1, col2, col3 = st.columns([2,2,1])
+
+        with col1:
+            # Disciplinas existentes + opção nova
+            existentes = [d for d in get_all_disciplinas() if d != "— Sistema —"]
+            opcoes = ["(Sem Disciplina)"] + existentes + ["+ Nova disciplina..."]
+            escolha_disc = st.selectbox("Disciplina", opcoes, index=(opcoes.index(qinfo["disciplina"]) if qinfo["disciplina"] in opcoes else 0))
+        with col2:
+            nova_disc = ""
+            if escolha_disc == "+ Nova disciplina...":
+                nova_disc = st.text_input("Nome da nova disciplina", value="")
+        with col3:
+            if st.button("Salvar disciplina", use_container_width=True):
+                final_disc = nova_disc.strip() if escolha_disc == "+ Nova disciplina..." else (None if escolha_disc == "(Sem Disciplina)" else escolha_disc)
+                update_questionario_disciplina(qid, final_disc or "Sem Disciplina")
+                st.success("Disciplina atualizada.")
+                st.rerun()
+
+        desc = st.text_area("Descrição (opcional)", value=qinfo.get("descricao",""), height=80)
+        if st.button("Salvar descrição"):
+            update_questionario_descricao(qid, desc)
+            st.toast("Descrição atualizada.")
+
+        st.divider()
+        c1, _ = st.columns([1,3])
+        with c1:
+            if st.button("🔄 Resetar resoluções deste questionário"):
+                resetar_resolucoes(qid)
+                st.rerun()
 
     show_desempenho_block(qid)
     st.subheader("Questões")
@@ -700,7 +760,7 @@ def page_importar():
         st.code(TEMPLATE_DOC, language="text")
 
     up = st.file_uploader("Enviar arquivo CSV", type=["csv"])
-    txt = st.text_area("... ou cole aqui o conteúdo do CSV", height=180, placeholder="tipo,questionario,texto,correta,explicacao,alternativas\n...")
+    txt = st.text_area("... ou cole aqui o conteúdo do CSV", height=180, placeholder="tipo,questionario,disciplina,texto,correta,explicacao,alternativas\n...")
     
     if st.button("Importar", type="primary"):
         with st.spinner("Importando questões..."):
@@ -822,13 +882,11 @@ def page_run_simulado():
 # Main Navigation
 # =============================
 def main():
-    # Verifica conexão apenas uma vez por sessão
     if "db_checked" not in st.session_state:
         ok = connection_status()
         if not ok:
             st.stop()
         st.session_state["db_checked"] = True
-        # Inicializa DB apenas uma vez
         init_db()
     
     st.session_state.setdefault("nav_choice", "Painel")
