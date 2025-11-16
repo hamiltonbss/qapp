@@ -587,10 +587,13 @@ def show_desempenho_block(qid, show_respondidas=False):
 def render_questao(q_row, parent_qid, questao_numero=None):
     """
     Renderiza uma questão individual na página Praticar.
+
     Ajustes:
+    - Para questões de múltipla escolha (MC), cada alternativa tem um "risco visual":
+      o usuário pode clicar para tachar / destachar a alternativa, apenas na tela.
+      Isso NÃO é registrado como resposta, nem vai para o banco.
     - Confirmação de acerto/erro aparece logo acima da explicação.
-    - Campo de explicação com altura fixa e scrollbar (não tenta adaptar por linhas).
-    - Explicação sempre aberta para não "sumir" ao responder/navegar.
+    - Campo de explicação com altura fixa e scrollbar.
     """
     qid = q_row["id"]
     tipo = q_row["tipo"]
@@ -601,7 +604,9 @@ def render_questao(q_row, parent_qid, questao_numero=None):
         st.markdown(f"#### Questão {questao_numero}")
     st.markdown(f"**{q_row['texto']}**")
 
-    # Entrada de resposta
+    # ======================
+    # RESPOSTA VF
+    # ======================
     if tipo == "VF":
         vf_options = ["— Selecione —", "Verdadeiro", "Falso"]
         escolha = st.radio("Sua resposta", vf_options, key=f"vf_{qid}", index=0)
@@ -614,14 +619,44 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             save_resposta(parent_qid, qid, is_correct)
             if not is_correct:
                 duplicar_questao_para_erros(qid)
+
+    # ======================
+    # RESPOSTA MC + RISCAR ALTERNATIVAS
+    # ======================
     else:
         alternativas = [q_row["op_a"], q_row["op_b"], q_row["op_c"], q_row["op_d"], q_row["op_e"]]
-        letras = ["A","B","C","D","E"]
+        letras = ["A", "B", "C", "D", "E"]
         opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
+
+        # --- BLOCO DE RASCUNHO VISUAL (riscar alternativas) ---
+        st.caption("Clique para riscar mentalmente alternativas (não conta como resposta):")
+        for letra, alt in opts:
+            strike_key = f"strike_{qid}_{letra}"
+            if strike_key not in st.session_state:
+                st.session_state[strike_key] = False
+
+            col_cb, col_txt = st.columns([0.08, 0.92])
+            with col_cb:
+                # Checkbox só controla o visual, não é resposta nem vai para o banco
+                marcado = st.checkbox("", key=strike_key, value=st.session_state[strike_key])
+                st.session_state[strike_key] = marcado
+            with col_txt:
+                if st.session_state[strike_key]:
+                    st.markdown(
+                        f"<span style='text-decoration: line-through; color: #6b7280;'>{letra}) {alt}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(f"{letra}) {alt}")
+
+        st.markdown("---")
+
+        # --- RADIO DA RESPOSTA OFICIAL (o que realmente conta) ---
         labels = ["— Selecione —"] + [f"{letra}) {alt}" for letra, alt in opts]
-        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_{qid}", index=0)
+        escolha = st.radio("Escolha uma alternativa (resposta oficial)", labels, key=f"mc_{qid}", index=0)
+
         if answered_key not in st.session_state and escolha != "— Selecione —":
-            letra_escolhida = escolha.split(")")[0]
+            letra_escolhida = escolha.split(")")[0]  # pega 'A', 'B', etc.
             is_correct = (letra_escolhida == q_row["correta_text"])
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
@@ -629,14 +664,18 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             if not is_correct:
                 duplicar_questao_para_erros(qid)
 
-    # Feedback visual (também "em cima", antes da explicação)
+    # ======================
+    # FEEDBACK ACERTO/ERRO
+    # ======================
     if st.session_state.get(answered_key):
         if st.session_state.get(result_key):
             st.success("✅ Você acertou esta questão.")
         else:
             st.error(f"❌ Você errou esta questão. Gabarito: {q_row['correta_text']}")
 
-    # Explicação sempre aberta; altura fixa, sem tentativa de adaptar por número de linhas
+    # ======================
+    # EXPLICAÇÃO (sempre aberta, altura fixa)
+    # ======================
     with st.expander("Ver explicação / editar", expanded=True):
         exp_key = f"exp_{qid}"
         explicacao_atual = q_row.get("explicacao", "")
@@ -655,44 +694,7 @@ def render_questao(q_row, parent_qid, questao_numero=None):
         if duplicar_questao_para_favoritos(qid):
             st.toast("Adicionada em 'Favoritos'.")
 
-    st.divider()
-
-# =============================
-# Páginas
-# =============================
-def page_dashboard():
-    st.title("📚 Painel de Questionários (Agrupado por Disciplina)")
-
-    # Botão para atualizar Caderno de Erros com histórico
-    if st.button("📔 Atualizar Caderno de Erros com histórico"):
-        with st.spinner("Analisando respostas anteriores..."):
-            n = popular_caderno_erros()
-            if n > 0:
-                st.success(f"✅ {n} questões erradas adicionadas ao Caderno de Erros!")
-            else:
-                st.info("Nenhuma questão nova para adicionar.")
-
-    st.divider()
-
-    # Caderno de Erros fixado no topo do painel
-    all_qs = get_questionarios()
-    caderno_erros = next((q for q in all_qs if q["nome"] == "Caderno de Erros"), None)
-    if caderno_erros:
-        with st.container(border=True):
-            st.subheader("🧨 Caderno de Erros (fixado)")
-            show_desempenho_block(caderno_erros["id"], show_respondidas=True)
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Praticar Caderno de Erros", key="pr_erros"):
-                    st.session_state["current_qid"] = caderno_erros["id"]
-                    st.session_state["go_to"] = "Praticar"
-                    st.rerun()
-            with c2:
-                if st.button("Gerenciar Caderno de Erros", key="ger_erros"):
-                    st.session_state["current_qid"] = caderno_erros["id"]
-                    st.session_state["go_to"] = "Gerenciar"
-                    st.rerun()
-
+    
     st.divider()
 
     # Demais questionários (sem Caderno de Erros e sem Favoritos)
