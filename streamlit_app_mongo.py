@@ -18,6 +18,65 @@ MONGO_DB_NAME = st.secrets.get("MONGO_DB_NAME", os.environ.get("MONGO_DB_NAME", 
 st.set_page_config(page_title="Estudos | Questionários & Simulados", layout="wide")
 
 # =============================
+# Estilo customizado (layout mais moderno e leve)
+# =============================
+def apply_custom_style():
+    st.markdown(
+        """
+        <style>
+        /* Fundo escuro com leve gradiente */
+        .stApp {
+            background-color: #020617;
+            background-image:
+                radial-gradient(circle at 0% 0%, #1e293b 0, transparent 55%),
+                radial-gradient(circle at 100% 0%, #0f172a 0, transparent 55%);
+            color: #e5e7eb;
+        }
+
+        h1, h2, h3, h4, h5 {
+            color: #e5e7eb;
+        }
+
+        /* Botões com pill + gradiente simples */
+        .stButton>button {
+            border-radius: 999px;
+            border: 1px solid #4f46e5;
+            background: linear-gradient(90deg, #4f46e5, #7c3aed);
+            color: #f9fafb;
+            padding: 0.35rem 1.1rem;
+            font-weight: 500;
+        }
+        .stButton>button:hover {
+            filter: brightness(1.05);
+            border-color: #a855f7;
+        }
+
+        /* Campos de entrada levemente mais escuros */
+        .stTextInput>div>div>input,
+        .stTextArea>div>textarea,
+        .stSelectbox>div>div>select,
+        .stNumberInput>div>input {
+            background-color: #020617 !important;
+            color: #e5e7eb !important;
+        }
+
+        /* Métricas com valor em cor de destaque */
+        [data-testid="stMetricValue"] {
+            color: #a5b4fc;
+        }
+
+        /* Progress bar mais discreta */
+        .stProgress > div > div > div {
+            background: linear-gradient(90deg, #4f46e5, #22c55e);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+apply_custom_style()
+
+# =============================
 # Connection Management (otimizado)
 # =============================
 @st.cache_resource
@@ -180,9 +239,20 @@ def resetar_resolucoes(qid):
     oid = ObjectId(qid)
     db.respostas.delete_many({"questionario_id": oid})
     # Limpa chaves de estado relacionadas
-    keys_to_del = [k for k in st.session_state.keys() if any(
-        k.startswith(prefix) for prefix in ("answered_", "result_", "vf_", "mc_", f"pool_{qid}")
-    )]
+    keys_to_del = [
+        k for k in st.session_state.keys()
+        if any(
+            k.startswith(prefix)
+            for prefix in (
+                "answered_",
+                "result_",
+                "vf_",
+                "mc_",
+                f"pool_{qid}",
+                f"idx_{qid}",
+            )
+        )
+    ]
     for k in keys_to_del:
         del st.session_state[k]
     st.toast("Resoluções resetadas para este questionário.")
@@ -260,7 +330,7 @@ def _last_correct_map(respostas):
     return last
 
 def desempenho_questionario(questionario_id):
-    """Retorna: total, corretas (última resposta correta), perc"""
+    """Retorna: total, corretas (última resposta correto), perc"""
     db = get_db()
     qid = ObjectId(questionario_id)
     total = db.questoes.count_documents({"questionario_id": qid})
@@ -490,18 +560,24 @@ def show_desempenho_block(qid, show_respondidas=False):
         with c3:
             st.progress(int(perc), text=f"Aproveitamento: {perc:.1f}%")
 
-# =============================
-# Páginas
-# =============================
 def render_questao(q_row, parent_qid, questao_numero=None):
+    """
+    Renderiza uma questão individual na página Praticar.
+    Ajustes:
+    - Confirmação de acerto/erro aparece logo acima da explicação.
+    - Campo de explicação com altura fixa e scrollbar (não tenta adaptar por linhas).
+    - Explicação sempre aberta para não "sumir" ao responder/navegar.
+    """
     qid = q_row["id"]
     tipo = q_row["tipo"]
     answered_key = f"answered_{qid}"
     result_key = f"result_{qid}"
+
     if questao_numero:
         st.markdown(f"#### Questão {questao_numero}")
     st.markdown(f"**{q_row['texto']}**")
 
+    # Entrada de resposta
     if tipo == "VF":
         vf_options = ["— Selecione —", "Verdadeiro", "Falso"]
         escolha = st.radio("Sua resposta", vf_options, key=f"vf_{qid}", index=0)
@@ -529,28 +605,41 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             if not is_correct:
                 duplicar_questao_para_erros(qid)
 
-    with st.expander("Ver explicação / editar", expanded=False):
+    # Feedback visual (também "em cima", antes da explicação)
+    if st.session_state.get(answered_key):
+        if st.session_state.get(result_key):
+            st.success("✅ Você acertou esta questão.")
+        else:
+            st.error(f"❌ Você errou esta questão. Gabarito: {q_row['correta_text']}")
+
+    # Explicação sempre aberta; altura fixa, sem tentativa de adaptar por número de linhas
+    with st.expander("Ver explicação / editar", expanded=True):
         exp_key = f"exp_{qid}"
-        explicacao_atual = q_row.get("explicacao","")
-        num_linhas = explicacao_atual.count('\n') + 1
-        altura = max(100, min(500, num_linhas * 25 + 50))
-        new_exp = st.text_area("Texto da explicação:", value=explicacao_atual, key=exp_key, height=altura)
+        explicacao_atual = q_row.get("explicacao", "")
+        new_exp = st.text_area(
+            "Texto da explicação:",
+            value=explicacao_atual,
+            key=exp_key,
+            height=180,
+        )
         if st.button("Salvar explicação", key=f"save_exp_{qid}"):
             update_questao_explicacao(qid, new_exp)
             st.toast("Explicação atualizada.")
 
-    if st.session_state.get(answered_key):
-        if st.session_state.get(result_key):
-            st.success("✅ Correto!")
-        else:
-            st.error(f"❌ Incorreto. Gabarito: {q_row['correta_text']}")
+    # Botão de favoritos
     if st.button("⭐ Salvar nos Favoritos", key=f"fav_{qid}"):
         if duplicar_questao_para_favoritos(qid):
             st.toast("Adicionada em 'Favoritos'.")
+
     st.divider()
 
+# =============================
+# Páginas
+# =============================
 def page_dashboard():
     st.title("📚 Painel de Questionários (Agrupado por Disciplina)")
+
+    # Botão para atualizar Caderno de Erros com histórico
     if st.button("📔 Atualizar Caderno de Erros com histórico"):
         with st.spinner("Analisando respostas anteriores..."):
             n = popular_caderno_erros()
@@ -558,9 +647,32 @@ def page_dashboard():
                 st.success(f"✅ {n} questões erradas adicionadas ao Caderno de Erros!")
             else:
                 st.info("Nenhuma questão nova para adicionar.")
+
     st.divider()
 
-    qs = [q for q in get_questionarios() if q["nome"] != "Caderno de Erros" and q["nome"] != "Favoritos"]
+    # Caderno de Erros fixado no topo do painel
+    all_qs = get_questionarios()
+    caderno_erros = next((q for q in all_qs if q["nome"] == "Caderno de Erros"), None)
+    if caderno_erros:
+        with st.container(border=True):
+            st.subheader("🧨 Caderno de Erros (fixado)")
+            show_desempenho_block(caderno_erros["id"], show_respondidas=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Praticar Caderno de Erros", key="pr_erros"):
+                    st.session_state["current_qid"] = caderno_erros["id"]
+                    st.session_state["go_to"] = "Praticar"
+                    st.rerun()
+            with c2:
+                if st.button("Gerenciar Caderno de Erros", key="ger_erros"):
+                    st.session_state["current_qid"] = caderno_erros["id"]
+                    st.session_state["go_to"] = "Gerenciar"
+                    st.rerun()
+
+    st.divider()
+
+    # Demais questionários (sem Caderno de Erros e sem Favoritos)
+    qs = [q for q in all_qs if q["nome"] not in ("Caderno de Erros", "Favoritos")]
     if not qs:
         st.info("Nenhum questionário cadastrado ainda. Vá em **Importar CSV** para começar.")
         return
@@ -572,15 +684,49 @@ def page_dashboard():
     for q in qs:
         grupos.setdefault(q["disciplina"] or "Sem Disciplina", []).append(q)
 
-    # Render: um card por disciplina, com dropdown de questionários
+    # Render: um card por disciplina, com estatísticas agregadas + dropdown
     for disc, items in sorted(grupos.items()):
         with st.container(border=True):
             st.subheader(f"📦 {disc}")
-            nomes_validos = [i["nome"] for i in items if (not filtro_global or filtro_global.lower() in i["nome"].lower())]
+
+            # Estatísticas agregadas da disciplina (soma de todos os cadernos daquela disciplina)
+            total_disc = 0
+            acertos_disc = 0
+            respondidas_disc = 0
+            for it in items:
+                t, a, _ = desempenho_questionario(it["id"])
+                total_disc += t
+                acertos_disc += a
+                respondidas_disc += respondidas_questionario(it["id"])
+            perc_disc = (acertos_disc / total_disc) * 100 if total_disc > 0 else 0.0
+
+            col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+            with col1:
+                st.metric("Total (disciplina)", total_disc)
+            with col2:
+                st.metric("Respondidas (disciplina)", respondidas_disc)
+            with col3:
+                st.metric("Corretas (disciplina)", acertos_disc)
+            with col4:
+                st.progress(int(perc_disc), text=f"Aproveitamento da disciplina: {perc_disc:.1f}%")
+
+            st.markdown("---")
+
+            # Filtro por nome dentro da disciplina
+            nomes_validos = [
+                i["nome"]
+                for i in items
+                if (not filtro_global or filtro_global.lower() in i["nome"].lower())
+            ]
             if not nomes_validos:
                 st.caption("Nenhum questionário correspondente ao filtro.")
                 continue
-            sel = st.selectbox(f"Selecione um questionário de {disc}", nomes_validos, key=f"sel_{disc}")
+
+            sel = st.selectbox(
+                f"Selecione um questionário de {disc}",
+                nomes_validos,
+                key=f"sel_{disc}",
+            )
             escolhido = next((x for x in items if x["nome"] == sel), None)
             if escolhido:
                 show_desempenho_block(escolhido["id"])
@@ -608,10 +754,12 @@ def page_dashboard():
 def page_praticar():
     st.title("🎯 Praticar")
     qs = get_questionarios()
-    qs = [q for q in qs if q["nome"] != "Caderno de Erros"]  # pode praticar Favoritos
+    # Pode praticar Favoritos, mas não o Caderno de Erros automaticamente aqui
+    qs = [q for q in qs if q["nome"] != "Caderno de Erros"]
     if not qs:
         st.info("Nenhum questionário cadastrado.")
         return
+
     nomes = {q["nome"]: q["id"] for q in qs}
     default_id = st.session_state.get("current_qid")
     default_name = None
@@ -621,7 +769,11 @@ def page_praticar():
                 default_name = name
                 break
 
-    escolha = st.selectbox("Selecione um questionário", list(nomes.keys()), index=(list(nomes.keys()).index(default_name) if default_name in nomes else 0))
+    escolha = st.selectbox(
+        "Selecione um questionário",
+        list(nomes.keys()),
+        index=(list(nomes.keys()).index(default_name) if default_name in nomes else 0),
+    )
     qid = nomes[escolha]
     st.session_state["current_qid"] = qid
 
@@ -638,9 +790,12 @@ def page_praticar():
     st.subheader("Desempenho")
     show_desempenho_block(qid, show_respondidas=True)
 
-    # Estado de navegação
+    # Estado de navegação: lista fixa de questões + índice atual
     key_pool = f"pool_{qid}"
+    key_idx = f"idx_{qid}"
+
     if key_pool not in st.session_state:
+        # Embaralha apenas uma vez por questionário
         st.session_state[key_pool] = [r["id"] for r in get_questoes(qid)]
         random.shuffle(st.session_state[key_pool])
 
@@ -649,28 +804,39 @@ def page_praticar():
         st.info("Acabaram as questões! Você pode **resetar resoluções** para reiniciar.")
         return
 
-    current_qid = pool[-1]
-    row = get_questao_by_id(current_qid)
-    total_questoes = len(get_questoes(qid))
-    questao_numero = total_questoes - len(pool) + 1
+    # Garante índice válido
+    st.session_state.setdefault(key_idx, 0)
+    idx = st.session_state[key_idx]
+    idx = max(0, min(idx, len(pool) - 1))
+    st.session_state[key_idx] = idx
 
-    if st.button("Próxima questão ▶", key="next_top"):
-        pool.pop()
-        for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
-            if k in st.session_state:
-                del st.session_state[k]
-        st.rerun()
-        
+    current_qid = pool[idx]
+    row = get_questao_by_id(current_qid)
+    total_questoes = len(pool)
+    questao_numero = idx + 1
+
+    # Navegação: voltar / avançar + indicador da posição
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 2])
+    with nav_col1:
+        if st.button("◀ Questão anterior", key="prev_top", disabled=(idx == 0)):
+            st.session_state[key_idx] = max(0, idx - 1)
+            st.rerun()
+    with nav_col2:
+        if st.button("Próxima questão ▶", key="next_top", disabled=(idx >= total_questoes - 1)):
+            st.session_state[key_idx] = min(total_questoes - 1, idx + 1)
+            st.rerun()
+    with nav_col3:
+        st.markdown(f"**Questão {questao_numero} de {total_questoes}**")
+
+    # Render da questão atual
     render_questao(row, parent_qid=qid, questao_numero=questao_numero)
 
     st.subheader("Desempenho (atualizado)")
     show_desempenho_block(qid, show_respondidas=True)
 
-    if st.button("Próxima questão ▶"):
-        pool.pop()
-        for k in [f"answered_{current_qid}", f"result_{current_qid}", f"vf_{current_qid}", f"mc_{current_qid}"]:
-            if k in st.session_state:
-                del st.session_state[k]
+    # Botão extra de próxima questão no fim da página
+    if st.button("Próxima questão ▶", key="next_bottom", disabled=(idx >= total_questoes - 1)):
+        st.session_state[key_idx] = min(total_questoes - 1, idx + 1)
         st.rerun()
 
 def page_gerenciar():
@@ -715,7 +881,7 @@ def page_gerenciar():
 
         desc = st.text_area("Descrição (opcional)", value=qinfo.get("descricao",""), height=80)
         if st.button("Salvar descrição"):
-            update_questionario_descricao(qid, desc)
+            update_questao_explicacao(qid, desc) if False else update_questionario_descricao(qid, desc)  # mantém comportamento original
             st.toast("Descrição atualizada.")
 
         st.divider()
