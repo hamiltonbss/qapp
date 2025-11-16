@@ -588,11 +588,12 @@ def render_questao(q_row, parent_qid, questao_numero=None):
     """
     Renderiza uma questão individual na página Praticar.
 
-    - Para VF: comportamento normal.
-    - Para MC:
-        * Mostra um "rascunho" clicável para riscar/destacar alternativas.
-        * Esse rascunho NÃO conta como resposta e não vai para o banco.
-        * A resposta oficial continua sendo o radio abaixo.
+    - VF: igual antes.
+    - MC:
+        * Mostra cada alternativa UMA vez, com um checkbox na frente para riscar.
+        * O checkbox é só visual (rascunho), não conta como resposta nem vai para o banco.
+        * A resposta oficial é escolhida num radio separado apenas com as letras (A, B, C...),
+          sem repetir os textos das alternativas.
     """
     qid = q_row["id"]
     tipo = q_row["tipo"]
@@ -627,25 +628,21 @@ def render_questao(q_row, parent_qid, questao_numero=None):
         letras = ["A", "B", "C", "D", "E"]
         opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
 
-        # ----- BLOCO DE RASCUNHO (riscar alternativas) -----
+        # ----- LISTA ÚNICA DE ALTERNATIVAS COM CHECKBOX NA FRENTE -----
         st.caption("Clique para riscar mentalmente alternativas (não conta como resposta):")
 
         for letra, alt in opts:
             strike_key = f"strike_{qid}_{letra}"
-
-            # Define valor inicial apenas se ainda não existir
+            # inicializa como False se ainda não existir
             if strike_key not in st.session_state:
                 st.session_state[strike_key] = False
 
-            col_cb, col_txt = st.columns([0.08, 0.92])
+            col_cb, col_txt = st.columns([0.06, 0.94])
             with col_cb:
-                # NÃO precisamos atribuir de volta no session_state;
-                # o Streamlit faz isso automaticamente pelo key
+                # checkbox só controla o risco visual
                 st.checkbox("", key=strike_key)
-
             with col_txt:
                 if st.session_state.get(strike_key, False):
-                    # alternativa riscada
                     st.markdown(
                         f"<span style='text-decoration: line-through; color: #6b7280;'>{letra}) {alt}</span>",
                         unsafe_allow_html=True,
@@ -655,17 +652,17 @@ def render_questao(q_row, parent_qid, questao_numero=None):
 
         st.markdown("---")
 
-        # ----- RESPOSTA OFICIAL (que realmente conta) -----
-        labels = ["— Selecione —"] + [f"{letra}) {alt}" for letra, alt in opts]
+        # ----- RESPOSTA OFICIAL: APENAS LETRAS (SEM REPETIR TEXTO) -----
+        letras_opts = ["— Selecione —"] + [l for l, _ in opts]
         escolha = st.radio(
-            "Escolha uma alternativa (resposta oficial)",
-            labels,
+            "Escolha a alternativa correta (resposta oficial)",
+            letras_opts,
             key=f"mc_{qid}",
             index=0,
         )
 
         if answered_key not in st.session_state and escolha != "— Selecione —":
-            letra_escolhida = escolha.split(")")[0].strip()
+            letra_escolhida = escolha.strip()
             is_correct = (letra_escolhida == q_row["correta_text"])
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
