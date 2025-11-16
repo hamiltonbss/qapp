@@ -632,16 +632,19 @@ def render_questao(q_row, parent_qid, questao_numero=None):
 
         for letra, alt in opts:
             strike_key = f"strike_{qid}_{letra}"
+
+            # Define valor inicial apenas se ainda não existir
             if strike_key not in st.session_state:
                 st.session_state[strike_key] = False
 
             col_cb, col_txt = st.columns([0.08, 0.92])
             with col_cb:
-                marcado = st.checkbox("", key=strike_key, value=st.session_state[strike_key])
-                st.session_state[strike_key] = marcado
+                # NÃO precisamos atribuir de volta no session_state;
+                # o Streamlit faz isso automaticamente pelo key
+                st.checkbox("", key=strike_key)
 
             with col_txt:
-                if st.session_state[strike_key]:
+                if st.session_state.get(strike_key, False):
                     # alternativa riscada
                     st.markdown(
                         f"<span style='text-decoration: line-through; color: #6b7280;'>{letra}) {alt}</span>",
@@ -701,6 +704,7 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.toast("Adicionada em 'Favoritos'.")
 
     st.divider()
+
 
 # =============================
 # Páginas
