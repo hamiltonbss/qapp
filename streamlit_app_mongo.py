@@ -588,17 +588,19 @@ def render_questao(q_row, parent_qid, questao_numero=None):
     """
     Renderiza uma questão individual na página Praticar.
 
-    - VF: igual antes.
+    - VF: igual antes (radio padrão).
     - MC:
-        * Mostra cada alternativa UMA vez, com um checkbox na frente para riscar.
+        * Cada alternativa aparece em UMA linha com:
+            [checkbox para riscar] [botão tipo radio] [texto da alternativa]
         * O checkbox é só visual (rascunho), não conta como resposta nem vai para o banco.
-        * A resposta oficial é escolhida num radio separado apenas com as letras (A, B, C...),
-          sem repetir os textos das alternativas.
+        * O botão 🔘 / ⚪ funciona como radio: só uma letra fica selecionada.
+        * Quando a primeira letra é escolhida, a resposta é gravada (save_resposta) e travada.
     """
     qid = q_row["id"]
     tipo = q_row["tipo"]
-    answered_key = f"answered_{qid}"
-    result_key = f"result_{qid}"
+    answered_key = f"answered_{qid}"          # se já foi respondida (verdadeiro/falso)
+    result_key = f"result_{qid}"              # True/False se acertou
+    answer_letter_key = f"answer_letter_{qid}"  # letra escolhida na MC (A, B, C...)
 
     if questao_numero:
         st.markdown(f"#### Questão {questao_numero}")
@@ -628,19 +630,35 @@ def render_questao(q_row, parent_qid, questao_numero=None):
         letras = ["A", "B", "C", "D", "E"]
         opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
 
-        # ----- LISTA ÚNICA DE ALTERNATIVAS COM CHECKBOX NA FRENTE -----
-        st.caption("Clique para riscar mentalmente alternativas (não conta como resposta):")
+        st.caption("Clique para riscar mentalmente alternativas e escolher a resposta:")
+
+        # letra atualmente selecionada (se houver)
+        current_letter = st.session_state.get(answer_letter_key, None)
 
         for letra, alt in opts:
             strike_key = f"strike_{qid}_{letra}"
-            # inicializa como False se ainda não existir
             if strike_key not in st.session_state:
                 st.session_state[strike_key] = False
 
-            col_cb, col_txt = st.columns([0.06, 0.94])
+            # 3 colunas: [checkbox riscar] [botão tipo radio] [texto]
+            col_cb, col_radio, col_txt = st.columns([0.06, 0.06, 0.88])
+
+            # checkbox de riscar (rascunho visual)
             with col_cb:
-                # checkbox só controla o risco visual
                 st.checkbox("", key=strike_key)
+
+            # botão que se comporta como radio
+            with col_radio:
+                # símbolo visual: ⚪ não selecionado, 🔘 selecionado
+                simbolo = "🔘" if current_letter == letra else "⚪"
+                # se a questão já foi respondida, não deixa mudar a resposta
+                disabled = answered_key in st.session_state
+                clicked = st.button(simbolo, key=f"ansbtn_{qid}_{letra}", disabled=disabled)
+                if clicked and answered_key not in st.session_state:
+                    st.session_state[answer_letter_key] = letra
+                    current_letter = letra  # reflete imediatamente nesta renderização
+
+            # texto da alternativa (com ou sem risco)
             with col_txt:
                 if st.session_state.get(strike_key, False):
                     st.markdown(
@@ -650,19 +668,17 @@ def render_questao(q_row, parent_qid, questao_numero=None):
                 else:
                     st.markdown(f"{letra}) {alt}")
 
-        st.markdown("---")
+        # texto informando o que está selecionado (só informativo)
+        sel_txt = st.session_state.get(answer_letter_key, None)
+        st.caption(f"Resposta selecionada: **{sel_txt if sel_txt else 'nenhuma'}**")
 
-        # ----- RESPOSTA OFICIAL: APENAS LETRAS (SEM REPETIR TEXTO) -----
-        letras_opts = ["— Selecione —"] + [l for l, _ in opts]
-        escolha = st.radio(
-            "Escolha a alternativa correta (resposta oficial)",
-            letras_opts,
-            key=f"mc_{qid}",
-            index=0,
-        )
-
-        if answered_key not in st.session_state and escolha != "— Selecione —":
-            letra_escolhida = escolha.strip()
+        # grava a resposta no banco apenas na primeira escolha
+        if (
+            tipo == "MC"
+            and answered_key not in st.session_state
+            and st.session_state.get(answer_letter_key) is not None
+        ):
+            letra_escolhida = st.session_state[answer_letter_key]
             is_correct = (letra_escolhida == q_row["correta_text"])
             st.session_state[answered_key] = True
             st.session_state[result_key] = is_correct
@@ -701,7 +717,6 @@ def render_questao(q_row, parent_qid, questao_numero=None):
             st.toast("Adicionada em 'Favoritos'.")
 
     st.divider()
-
 
 # =============================
 # Páginas
