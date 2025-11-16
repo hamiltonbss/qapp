@@ -24,50 +24,74 @@ def apply_custom_style():
     st.markdown(
         """
         <style>
-        /* Fundo escuro com leve gradiente */
+        /* Fundo claro, sem tema escuro */
         .stApp {
-            background-color: #020617;
+            background-color: #E2E2E2; /* Platinum */
             background-image:
-                radial-gradient(circle at 0% 0%, #1e293b 0, transparent 55%),
-                radial-gradient(circle at 100% 0%, #0f172a 0, transparent 55%);
-            color: #e5e7eb;
+                radial-gradient(circle at 0% 0%, #D1E8E2 0, transparent 55%),
+                radial-gradient(circle at 100% 0%, #A9D6E5 0, transparent 55%);
+            color: #222222;
         }
 
         h1, h2, h3, h4, h5 {
-            color: #e5e7eb;
+            color: #19747E; /* Dark Cyan */
         }
 
-        /* Botões com pill + gradiente simples */
+        /* Botões com a paleta nova */
         .stButton>button {
             border-radius: 999px;
-            border: 1px solid #4f46e5;
-            background: linear-gradient(90deg, #4f46e5, #7c3aed);
-            color: #f9fafb;
+            border: 1px solid #19747E;
+            background: linear-gradient(90deg, #19747E, #A9D6E5);
+            color: #ffffff;
             padding: 0.35rem 1.1rem;
             font-weight: 500;
         }
         .stButton>button:hover {
             filter: brightness(1.05);
-            border-color: #a855f7;
+            border-color: #19747E;
         }
 
-        /* Campos de entrada levemente mais escuros */
+        /* Campos de entrada claros */
         .stTextInput>div>div>input,
         .stTextArea>div>textarea,
         .stSelectbox>div>div>select,
         .stNumberInput>div>input {
-            background-color: #020617 !important;
-            color: #e5e7eb !important;
+            background-color: #ffffff !important;
+            color: #222222 !important;
+            border-radius: 8px;
+            border: 1px solid #A9D6E5 !important; /* Light Blue */
         }
 
-        /* Métricas com valor em cor de destaque */
+        /* Labels e pequenos textos */
+        label, .css-10trblm, .css-16idsys, .stMarkdown {
+            color: #222222;
+        }
+
+        /* Cards/containers com borda suave */
+        [data-testid="stVerticalBlock"] > div[style*="border"],
+        .stContainer {
+            border-radius: 12px !important;
+        }
+
+        /* Métricas com cor de destaque */
         [data-testid="stMetricValue"] {
-            color: #a5b4fc;
+            color: #19747E; /* Dark Cyan */
         }
 
-        /* Progress bar mais discreta */
+        /* Progress bar com cores da paleta */
         .stProgress > div > div > div {
-            background: linear-gradient(90deg, #4f46e5, #22c55e);
+            background: linear-gradient(90deg, #19747E, #D1E8E2);
+        }
+
+        /* Expander com fundo levemente mint */
+        details {
+            background-color: #D1E8E2 !important; /* Soft Mint Green */
+            border-radius: 10px;
+        }
+
+        /* Remover fundo muito escuro de radios/checkboxes, deixar padrão claro */
+        div[role="radiogroup"] label, div[role="checkbox"] label {
+            color: #222222 !important;
         }
         </style>
         """,
