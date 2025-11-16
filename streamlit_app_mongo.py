@@ -698,7 +698,7 @@ def render_questao(q_row, parent_qid, questao_numero=None):
     # ======================
     # EXPLICAÇÃO (sempre aberta, altura fixa)
     # ======================
-    with st.expander("Ver explicação / editar", expanded=True):
+    with st.expander("Ver explicação / editar", expanded=False):
         exp_key = f"exp_{qid}"
         explicacao_atual = q_row.get("explicacao", "")
         new_exp = st.text_area(
