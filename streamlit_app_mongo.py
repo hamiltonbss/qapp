@@ -254,6 +254,8 @@ def delete_questionario(qid):
     oid = ObjectId(qid)
     db.questoes.delete_many({"questionario_id": oid})
     db.respostas.delete_many({"questionario_id": oid})
+    # Remove progresso salvo (retomar de onde parou)
+    db.questionarios.update_one({"_id": oid}, {"$unset": {"progress_pool": "", "progress_idx": "", "progress_updated_at": ""}})
     db.questionarios.delete_one({"_id": oid})
     get_questionarios.clear()
 
@@ -345,6 +347,35 @@ def save_resposta(questionario_id, questao_id, correto):
         "correto": 1 if correto else 0,
         "respondido_em": datetime.now(timezone.utc).isoformat()
     })
+
+
+def get_questionario_progress(questionario_id):
+    """Carrega progresso salvo do questionário (pool e índice atual)."""
+    db = get_db()
+    doc = db.questionarios.find_one(
+        {"_id": ObjectId(questionario_id)},
+        {"progress_pool": 1, "progress_idx": 1}
+    ) or {}
+    pool = doc.get("progress_pool") or []
+    idx = int(doc.get("progress_idx") or 0)
+    # Sanitiza
+    if not isinstance(pool, list):
+        pool = []
+    idx = max(0, idx)
+    return pool, idx
+
+def set_questionario_progress(questionario_id, pool, idx):
+    """Salva progresso (para retomar de onde parou)."""
+    db = get_db()
+    db.questionarios.update_one(
+        {"_id": ObjectId(questionario_id)},
+        {"$set": {
+            "progress_pool": list(pool),
+            "progress_idx": int(idx),
+            "progress_updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+
 
 def _last_correct_map(respostas):
     """Mapeia questao_id -> bool (se última resposta foi correta)."""
@@ -687,13 +718,19 @@ def render_questao(q_row, parent_qid, questao_numero=None):
                 duplicar_questao_para_erros(qid)
 
     # ======================
-    # FEEDBACK ACERTO / ERRO
+    # FEEDBACK ACERTO / ERRO (com explicação)
     # ======================
     if st.session_state.get(answered_key):
         if st.session_state.get(result_key):
             st.success("✅ Você acertou esta questão.")
         else:
             st.error(f"❌ Você errou esta questão. Gabarito: {q_row['correta_text']}")
+
+        # Mostra a explicação junto do feedback (se houver)
+        exp_txt = (q_row.get("explicacao") or "").strip()
+        if exp_txt:
+            st.markdown("**Explicação:**")
+            st.markdown(exp_txt)
 
     # ======================
     # EXPLICAÇÃO (sempre aberta, altura fixa)
@@ -879,10 +916,25 @@ def page_praticar():
     key_pool = f"pool_{qid}"
     key_idx = f"idx_{qid}"
 
+    # Se a sessão for interrompida, tenta retomar do ponto salvo no MongoDB.
     if key_pool not in st.session_state:
-        # Embaralha apenas uma vez por questionário
-        st.session_state[key_pool] = [r["id"] for r in get_questoes(qid)]
-        random.shuffle(st.session_state[key_pool])
+        saved_pool, saved_idx = get_questionario_progress(qid)
+
+        # Valida pool salvo contra as questões atuais do questionário
+        current_ids = {r["id"] for r in get_questoes(qid)}
+        saved_pool = [x for x in saved_pool if x in current_ids]
+
+        if saved_pool:
+            st.session_state[key_pool] = saved_pool
+            st.session_state[key_idx] = min(max(int(saved_idx), 0), len(saved_pool) - 1)
+        else:
+            # Embaralha apenas uma vez (quando não há progresso salvo)
+            st.session_state[key_pool] = [r["id"] for r in get_questoes(qid)]
+            random.shuffle(st.session_state[key_pool])
+            st.session_state[key_idx] = 0
+
+        # Persiste imediatamente (para garantir consistência)
+        set_questionario_progress(qid, st.session_state[key_pool], st.session_state[key_idx])
 
     pool = st.session_state[key_pool]
     if not pool:
@@ -894,6 +946,7 @@ def page_praticar():
     idx = st.session_state[key_idx]
     idx = max(0, min(idx, len(pool) - 1))
     st.session_state[key_idx] = idx
+    set_questionario_progress(qid, pool, idx)
 
     current_qid = pool[idx]
     row = get_questao_by_id(current_qid)
@@ -905,10 +958,12 @@ def page_praticar():
     with nav_col1:
         if st.button("◀ Questão anterior", key="prev_top", disabled=(idx == 0)):
             st.session_state[key_idx] = max(0, idx - 1)
+            set_questionario_progress(qid, pool, st.session_state[key_idx])
             st.rerun()
     with nav_col2:
         if st.button("Próxima questão ▶", key="next_top", disabled=(idx >= total_questoes - 1)):
             st.session_state[key_idx] = min(total_questoes - 1, idx + 1)
+            set_questionario_progress(qid, pool, st.session_state[key_idx])
             st.rerun()
     with nav_col3:
         st.markdown(f"**Questão {questao_numero} de {total_questoes}**")
@@ -922,6 +977,7 @@ def page_praticar():
     # Botão extra de próxima questão no fim da página
     if st.button("Próxima questão ▶", key="next_bottom", disabled=(idx >= total_questoes - 1)):
         st.session_state[key_idx] = min(total_questoes - 1, idx + 1)
+        set_questionario_progress(qid, pool, st.session_state[key_idx])
         st.rerun()
 
 def page_gerenciar():
@@ -1115,6 +1171,12 @@ def page_run_simulado():
             st.success("✅ Correto!")
         else:
             st.error("❌ Incorreto.")
+
+        exp_txt = (q.get("explicacao") or "").strip()
+        if exp_txt:
+            st.markdown("**Explicação:**")
+            st.markdown(exp_txt)
+
         with st.expander("Ver explicação / editar"):
             exp_key = f"exp_sim_{qid}"
             new_exp = st.text_area("Texto da explicação (salvo no banco):", value=q.get("explicacao",""), key=exp_key, height=160)
