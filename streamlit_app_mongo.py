@@ -149,6 +149,10 @@ def init_db():
         db.respostas.create_index([("questionario_id", ASCENDING)], background=True)
         db.respostas.create_index([("questao_id", ASCENDING)], background=True)
 
+        # Simulados
+        db.simulados.create_index([("updated_at", DESCENDING)], name="idx_sim_updated_at", background=True)
+        db.simulados.create_index([("nome", ASCENDING)], name="idx_sim_nome", background=True)
+
         # Garante existência dos cadernos especiais (com disciplina do sistema)
         if db.questionarios.count_documents({"nome": "Favoritos"}, limit=1) == 0:
             db.questionarios.insert_one({
@@ -339,6 +343,75 @@ def get_random_questoes(questionario_ids, n):
     ]
     return [_doc_to_row_questao(x) for x in db.questoes.aggregate(pipeline)]
 
+
+def get_balanced_random_questoes_por_questionario(questionario_ids, n):
+    """Sorteia questões de forma equilibrada entre questionários.
+    - Distribui a cota de n o mais uniformemente possível entre os questionários.
+    - Se algum questionário tiver menos questões do que sua cota, redistribui o restante.
+    Retorna lista de questões (dicts) e total_disponivel.
+    """
+    db = get_db()
+    qids = [ObjectId(x) for x in questionario_ids]
+    if not qids or int(n) <= 0:
+        return [], 0
+
+    # Quantidade disponível por questionário
+    counts = {str(qid): db.questoes.count_documents({"questionario_id": qid}) for qid in qids}
+    total_disp = sum(counts.values())
+    if total_disp == 0:
+        return [], 0
+
+    target = min(int(n), total_disp)
+    # Alocação inicial uniforme
+    alive = [str(qid) for qid in qids if counts.get(str(qid), 0) > 0]
+    if not alive:
+        return [], 0
+
+    alloc = {qid: 0 for qid in alive}
+    base = target // len(alive)
+    rem = target % len(alive)
+
+    for qid in alive:
+        alloc[qid] = min(base, counts[qid])
+
+    # distribui o resto (round-robin) respeitando disponibilidade
+    remaining = target - sum(alloc.values())
+    order = list(alive)
+    i = 0
+    while remaining > 0 and order:
+        qid = order[i % len(order)]
+        if alloc[qid] < counts[qid]:
+            alloc[qid] += 1
+            remaining -= 1
+        i += 1
+        # segurança contra loop infinito
+        if i > 100000:
+            break
+
+    # Agora busca amostras por questionário
+    out = []
+    for qid_str, k in alloc.items():
+        if k <= 0:
+            continue
+        pipeline = [
+            {"$match": {"questionario_id": ObjectId(qid_str)}},
+            {"$sample": {"size": int(k)}},
+        ]
+        out.extend([_doc_to_row_questao(x) for x in db.questoes.aggregate(pipeline)])
+
+    random.shuffle(out)
+    return out, total_disp
+
+def get_questionarios_por_disciplina(disciplinas):
+    """Retorna lista de questionários (dict) cujas disciplinas estão em 'disciplinas'."""
+    if not disciplinas:
+        return []
+    qs = get_questionarios()
+    disciplinas_set = set(disciplinas)
+    # Não inclui Favoritos
+    return [q for q in qs if q.get("nome") != "Favoritos" and (q.get("disciplina") or "Sem Disciplina") in disciplinas_set]
+
+
 def save_resposta(questionario_id, questao_id, correto):
     db = get_db()
     db.respostas.insert_one({
@@ -347,6 +420,99 @@ def save_resposta(questionario_id, questao_id, correto):
         "correto": 1 if correto else 0,
         "respondido_em": datetime.now(timezone.utc).isoformat()
     })
+
+
+
+# =============================
+# Simulados (persistência)
+# =============================
+def create_simulado(nome, pool_ids, meta=None):
+    """Cria um simulado persistido no MongoDB e retorna o id (str)."""
+    db = get_db()
+    doc = {
+        "nome": (nome or "").strip() or f"Simulado {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
+        "pool_ids": [str(x) for x in (pool_ids or [])],
+        "idx": 0,
+        "acertos": 0,
+        "total": int(len(pool_ids or [])),
+        "status": "in_progress",  # in_progress | finished
+        "meta": meta or {},
+        "respostas": [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    res = db.simulados.insert_one(doc)
+    return str(res.inserted_id)
+
+@st.cache_data(ttl=10)
+def list_simulados():
+    """Lista simulados (mais recentes primeiro)."""
+    db = get_db()
+    cur = db.simulados.find(
+        {},
+        {"nome": 1, "status": 1, "total": 1, "acertos": 1, "idx": 1, "created_at": 1, "updated_at": 1},
+    ).sort([("updated_at", DESCENDING)])
+    out = []
+    for d in cur:
+        out.append({
+            "id": str(d["_id"]),
+            "nome": d.get("nome",""),
+            "status": d.get("status","in_progress"),
+            "total": int(d.get("total") or 0),
+            "acertos": int(d.get("acertos") or 0),
+            "idx": int(d.get("idx") or 0),
+            "created_at": d.get("created_at"),
+            "updated_at": d.get("updated_at"),
+        })
+    return out
+
+def get_simulado(sim_id):
+    db = get_db()
+    d = db.simulados.find_one({"_id": ObjectId(sim_id)})
+    if not d:
+        return None
+    d["id"] = str(d["_id"])
+    return d
+
+def update_simulado_nome(sim_id, novo_nome):
+    db = get_db()
+    db.simulados.update_one(
+        {"_id": ObjectId(sim_id)},
+        {"$set": {"nome": (novo_nome or "").strip(), "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    list_simulados.clear()
+
+def update_simulado_progress(sim_id, idx=None, acertos=None, status=None):
+    db = get_db()
+    sets = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    if idx is not None:
+        sets["idx"] = int(idx)
+    if acertos is not None:
+        sets["acertos"] = int(acertos)
+    if status is not None:
+        sets["status"] = status
+    db.simulados.update_one({"_id": ObjectId(sim_id)}, {"$set": sets})
+    list_simulados.clear()
+
+def add_simulado_resposta(sim_id, questao_id, correto, resposta_raw):
+    """Registra resposta (append) e atualiza updated_at."""
+    db = get_db()
+    db.simulados.update_one(
+        {"_id": ObjectId(sim_id)},
+        {"$push": {"respostas": {
+            "questao_id": str(questao_id),
+            "correto": 1 if correto else 0,
+            "resposta": resposta_raw,
+            "respondido_em": datetime.now(timezone.utc).isoformat()
+        }},
+         "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    list_simulados.clear()
+
+def delete_simulado(sim_id):
+    db = get_db()
+    db.simulados.delete_one({"_id": ObjectId(sim_id)})
+    list_simulados.clear()
 
 
 def get_questionario_progress(questionario_id):
@@ -1107,78 +1273,285 @@ def page_importar():
 
 def page_simulado():
     st.title("📝 Simulados")
+
+    # -------------------------
+    # Simulados salvos (lista)
+    # -------------------------
+    sims = list_simulados()
+    with st.expander("📚 Simulados salvos", expanded=True):
+        if sims:
+            labels = []
+            for s in sims:
+                status = "✅ finalizado" if s.get("status") == "finished" else "⏳ em andamento"
+                labels.append(f"{s.get('nome','(Sem nome)')} • {status} • {s.get('acertos',0)}/{s.get('total',0)}")
+            sel_label = st.selectbox("Selecione um simulado", labels, index=0, key="sel_simulado_salvo")
+            sel_sim = sims[labels.index(sel_label)]
+            c1, c2, c3 = st.columns([1,1,2])
+            with c1:
+                if st.button("▶ Abrir / Continuar", key="btn_open_sim"):
+                    st.session_state["current_simulado_id"] = sel_sim["id"]
+                    st.session_state["mode"] = "run_simulado"
+                    st.session_state["go_to"] = "Simulados"
+                    st.rerun()
+            with c2:
+                if st.button("🗑️ Excluir", key="btn_del_sim"):
+                    delete_simulado(sel_sim["id"])
+                    if st.session_state.get("current_simulado_id") == sel_sim["id"]:
+                        st.session_state.pop("current_simulado_id", None)
+                        st.session_state["mode"] = None
+                    st.rerun()
+            with c3:
+                novo_nome = st.text_input("Renomear", value=sel_sim.get("nome",""), key="rename_sim")
+                if st.button("Salvar nome", key="btn_rename_sim"):
+                    update_simulado_nome(sel_sim["id"], novo_nome)
+                    st.toast("Nome atualizado.")
+                    st.rerun()
+        else:
+            st.caption("Nenhum simulado salvo ainda. Crie um novo abaixo.")
     qs_all = [q for q in get_questionarios() if q["nome"] != "Favoritos"]
     if not qs_all:
         st.info("Crie ou importe questionários primeiro.")
         return
-    options = {f"{q['nome']}": q['id'] for q in qs_all}
-    escolha = st.multiselect("Selecione um ou mais questionários", list(options.keys()))
-    qids = [options[k] for k in escolha]
 
-    total_disp = 0
-    if qids:
-        total_disp = sum(len(get_questoes(qid)) for qid in qids)
+    st.caption("Você pode montar o simulado por **disciplinas** (com distribuição equilibrada entre questionários) ou selecionar **questionários** diretamente.")
 
-    n = st.number_input("Número de questões no simulado", min_value=1, value=min(10, max(1,total_disp)), max_value=max(1,total_disp) if total_disp else 1, step=1, disabled=(total_disp==0))
+    modo = st.radio("Modo de seleção", ["Por disciplina", "Por questionário"], horizontal=True)
 
-    if st.button("Iniciar Simulado", type="primary", disabled=(not qids or total_disp == 0)):
-        st.session_state["simulado_qids"] = qids
-        st.session_state["simulado_pool"] = [dict(r) for r in get_random_questoes(qids, n)]
-        st.session_state["simulado_idx"] = 0
-        st.session_state["simulado_acertos"] = 0
-        st.session_state["mode"] = "run_simulado"
-        st.session_state["go_to"] = "Simulados"
-        st.rerun()
+    sim_nome = st.text_input("Nome do simulado (opcional)", value="", placeholder="Ex.: Simulado Constitucional - 20/01")
 
-def page_run_simulado():
-    st.title("🧪 Simulado em andamento")
-    pool = st.session_state.get("simulado_pool", [])
-    idx = st.session_state.get("simulado_idx", 0)
-    acertos = st.session_state.get("simulado_acertos", 0)
+    # -------------------------
+    # MODO: POR DISCIPLINA
+    # -------------------------
+    if modo == "Por disciplina":
+        disciplinas = [d for d in get_all_disciplinas() if d != "— Sistema —"]
+        if not disciplinas:
+            st.info("Nenhuma disciplina encontrada. Classifique questionários em **Gerenciar** ou importe via CSV com a coluna 'disciplina'.")
+            return
 
-    if idx >= len(pool):
-        total = len(pool)
-        perc = (acertos/total)*100 if total else 0
-        st.success(f"✅ Fim do simulado! Acertos: {acertos}/{total} ({perc:.1f}%).")
-        if st.button("Voltar aos simulados", type="primary"):
-            st.session_state["mode"] = None
+        sel_disc = st.multiselect("Selecione 1 ou mais disciplinas", disciplinas)
+
+        if not sel_disc:
+            st.info("Selecione ao menos uma disciplina para montar o simulado.")
+            return
+
+        # Questionários elegíveis por disciplina (mantém Favoritos fora)
+        qs_por_disc = get_questionarios_por_disciplina(sel_disc)
+
+        if not qs_por_disc:
+            st.warning("Não encontrei questionários nas disciplinas selecionadas (ou eles estão vazios).")
+            return
+
+        # Agrupa questionários por disciplina
+        grupos = {}
+        for q in qs_por_disc:
+            grupos.setdefault(q.get("disciplina") or "Sem Disciplina", []).append(q)
+
+        st.markdown("### Quantidade de questões por disciplina")
+        n_por_disc = {}
+        total_planejado = 0
+        for disc in sel_disc:
+            qids_disc = [q["id"] for q in grupos.get(disc, [])]
+            total_disp_disc = sum(len(get_questoes(qid)) for qid in qids_disc) if qids_disc else 0
+
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.write(f"**{disc}**")
+                st.caption(f"Questionários: {len(qids_disc)} • Questões disponíveis: {total_disp_disc}")
+            with col2:
+                n_val = st.number_input(
+                    f"Qtd ({disc})",
+                    min_value=0,
+                    value=min(10, total_disp_disc) if total_disp_disc else 0,
+                    max_value=total_disp_disc if total_disp_disc else 0,
+                    step=1,
+                    key=f"n_disc_{disc}",
+                    disabled=(total_disp_disc == 0),
+                )
+            n_por_disc[disc] = int(n_val)
+            total_planejado += int(n_val)
+
+        st.divider()
+        st.metric("Total de questões no simulado", total_planejado)
+
+        if st.button("Iniciar Simulado", type="primary", disabled=(total_planejado <= 0)):
+            pool_final = []
+            for disc in sel_disc:
+                qtd = int(n_por_disc.get(disc, 0))
+                if qtd <= 0:
+                    continue
+                qids_disc = [q["id"] for q in grupos.get(disc, [])]
+                if not qids_disc:
+                    continue
+                # Equilibra dentro da disciplina entre os questionários
+                parte, total_disp = get_balanced_random_questoes_por_questionario(qids_disc, qtd)
+                pool_final.extend([dict(r) for r in parte])
+
+            random.shuffle(pool_final)
+
+            if not pool_final:
+                st.warning("Não foi possível montar o simulado com as escolhas atuais.")
+                return
+
+            pool_ids = [q["id"] for q in pool_final]
+            sim_id = create_simulado(
+                sim_nome,
+                pool_ids,
+                meta={"modo": "Por disciplina", "disciplinas": list(sel_disc), "n_por_disc": dict(n_por_disc)},
+            )
+            st.session_state["current_simulado_id"] = sim_id
+            st.session_state["mode"] = "run_simulado"
             st.session_state["go_to"] = "Simulados"
             st.rerun()
+
+    # -------------------------
+    # MODO: POR QUESTIONÁRIO (mantém a forma antiga)
+    # -------------------------
+    else:
+        options = {f"{q['nome']}": q["id"] for q in qs_all}
+        escolha = st.multiselect("Selecione um ou mais questionários", list(options.keys()))
+        qids = [options[k] for k in escolha]
+
+        total_disp = 0
+        if qids:
+            total_disp = sum(len(get_questoes(qid)) for qid in qids)
+
+        n = st.number_input(
+            "Número de questões no simulado",
+            min_value=1,
+            value=min(10, max(1, total_disp)),
+            max_value=max(1, total_disp) if total_disp else 1,
+            step=1,
+            disabled=(total_disp == 0),
+        )
+
+        if st.button("Iniciar Simulado", type="primary", disabled=(not qids or total_disp == 0)):
+            pool_final = [dict(r) for r in get_random_questoes(qids, n)]
+            pool_ids = [q["id"] for q in pool_final]
+            sim_id = create_simulado(
+                sim_nome,
+                pool_ids,
+                meta={"modo": "Por questionário", "questionarios": list(qids), "n_total": int(n)},
+            )
+            st.session_state["current_simulado_id"] = sim_id
+            st.session_state["mode"] = "run_simulado"
+            st.session_state["go_to"] = "Simulados"
+            st.rerun()
+
+def page_run_simulado():
+
+    st.title("🧪 Simulado em andamento")
+
+    sim_id = st.session_state.get("current_simulado_id")
+    if not sim_id:
+        st.info("Nenhum simulado selecionado. Vá em **Simulados** e crie/abra um simulado.")
+        st.session_state["mode"] = None
         return
 
-    q = pool[idx]
-    st.info(f"Questão {idx+1} de {len(pool)}")
+    sim = get_simulado(sim_id)
+    if not sim:
+        st.error("Simulado não encontrado (pode ter sido excluído).")
+        st.session_state.pop("current_simulado_id", None)
+        st.session_state["mode"] = None
+        return
 
-    qid = q["id"]
-    tipo = q["tipo"]
+    pool_ids = sim.get("pool_ids") or []
+    idx = int(sim.get("idx") or 0)
+    acertos = int(sim.get("acertos") or 0)
+    total = int(sim.get("total") or len(pool_ids) or 0)
+
+    if not pool_ids or total == 0:
+        st.warning("Este simulado não tem questões.")
+        st.session_state["mode"] = None
+        return
+
+    # Mapa de respostas já registradas (última resposta por questão)
+    last_answer = {}
+    for r in sim.get("respostas") or []:
+        last_answer[str(r.get("questao_id"))] = {
+            "correto": bool(r.get("correto", 0)),
+            "resposta": r.get("resposta"),
+            "respondido_em": r.get("respondido_em"),
+        }
+
+    # Finalização
+    if idx >= len(pool_ids) or sim.get("status") == "finished":
+        perc = (acertos / total) * 100 if total else 0
+        st.success(f"✅ Fim do simulado! Acertos: {acertos}/{total} ({perc:.1f}%).")
+        update_simulado_progress(sim_id, status="finished")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Voltar aos simulados", type="primary"):
+                st.session_state["mode"] = None
+                st.session_state["go_to"] = "Simulados"
+                st.rerun()
+        with c2:
+            if st.button("Abrir lista de simulados salvos"):
+                st.session_state["mode"] = None
+                st.session_state["go_to"] = "Simulados"
+                st.rerun()
+        return
+
+    # Questão atual
+    questao_id = str(pool_ids[idx])
+    q = get_questao_by_id(questao_id)
+    if not q:
+        st.error("Questão não encontrada (pode ter sido removida). Pulando para a próxima…")
+        update_simulado_progress(sim_id, idx=idx + 1, acertos=acertos)
+        st.rerun()
+        return
+
+    st.info(f"Questão {idx+1} de {len(pool_ids)}")
     st.markdown(f"**{q['texto']}**")
 
-    answered_key = f"answered_sim_{qid}"
-    result_key = f"result_sim_{qid}"
+    # Chaves de UI por simulado
+    answered_key = f"answered_sim_{sim_id}_{questao_id}"
+    result_key = f"result_sim_{sim_id}_{questao_id}"
+
+    # Se já existe resposta persistida, trava a UI e mostra feedback
+    already = last_answer.get(questao_id)
+    if already and answered_key not in st.session_state:
+        st.session_state[answered_key] = True
+        st.session_state[result_key] = bool(already.get("correto"))
+
+    tipo = q["tipo"]
 
     if tipo == "VF":
         vf_options = ["— Selecione —", "Verdadeiro", "Falso"]
-        escolha = st.radio("Sua resposta", vf_options, key=f"vf_sim_{qid}", index=0)
-        if answered_key not in st.session_state and escolha != "— Selecione —":
+        disabled = bool(st.session_state.get(answered_key))
+        escolha = st.radio("Sua resposta", vf_options, key=f"vf_sim_{sim_id}_{questao_id}", index=0, disabled=disabled)
+        if (not st.session_state.get(answered_key)) and escolha != "— Selecione —":
             gabarito = (q["correta_text"] == "V")
             user = (escolha == "Verdadeiro")
+            is_correct = (gabarito == user)
+
+            add_simulado_resposta(sim_id, questao_id, is_correct, escolha)
+            acertos = acertos + (1 if is_correct else 0)
+            update_simulado_progress(sim_id, acertos=acertos)
+
             st.session_state[answered_key] = True
-            st.session_state[result_key] = (gabarito == user)
-            if st.session_state[result_key]:
-                st.session_state["simulado_acertos"] = acertos + 1
+            st.session_state[result_key] = is_correct
+
     else:
         alternativas = [q["op_a"], q["op_b"], q["op_c"], q["op_d"], q["op_e"]]
-        letras = ["A","B","C","D","E"]
+        letras = ["A", "B", "C", "D", "E"]
         opts = [(letras[i], alt) for i, alt in enumerate(alternativas) if alt]
         labels = ["— Selecione —"] + [f"{letra}) {alt}" for letra, alt in opts]
-        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_sim_{qid}", index=0)
-        if answered_key not in st.session_state and escolha != "— Selecione —":
-            letra_escolhida = escolha.split(")")[0]
-            st.session_state[answered_key] = True
-            st.session_state[result_key] = (letra_escolhida == q["correta_text"])
-            if st.session_state[result_key]:
-                st.session_state["simulado_acertos"] = acertos + 1
 
+        disabled = bool(st.session_state.get(answered_key))
+        escolha = st.radio("Escolha uma alternativa", labels, key=f"mc_sim_{sim_id}_{questao_id}", index=0, disabled=disabled)
+
+        if (not st.session_state.get(answered_key)) and escolha != "— Selecione —":
+            letra_escolhida = escolha.split(")")[0]
+            is_correct = (letra_escolhida == q["correta_text"])
+
+            add_simulado_resposta(sim_id, questao_id, is_correct, letra_escolhida)
+            acertos = acertos + (1 if is_correct else 0)
+            update_simulado_progress(sim_id, acertos=acertos)
+
+            st.session_state[answered_key] = True
+            st.session_state[result_key] = is_correct
+
+    # Feedback + explicação
     if st.session_state.get(answered_key):
         if st.session_state.get(result_key):
             st.success("✅ Correto!")
@@ -1188,34 +1561,31 @@ def page_run_simulado():
         exp_txt = (q.get("explicacao") or "").strip()
         if exp_txt:
             st.markdown(
-                f"""
-                <div style="
-                    background-color:#fff8c4;
-                    padding:14px;
-                    border-radius:6px;
-                    border:1px solid #e6d97a;
-                    margin-top:10px;
-                ">
-                    <strong>Explicação:</strong><br><br>
-                    {exp_txt}
-                </div>
-                """,
-                unsafe_allow_html=True
+                "<div style='background-color:#fff8c4; padding:14px; border-radius:6px; border:1px solid #e6d97a; margin-top:10px;'>"
+                "<strong>Explicação:</strong><br><br>"
+                f"{exp_txt}"
+                "</div>",
+                unsafe_allow_html=True,
             )
 
         with st.expander("Ver explicação / editar"):
-            exp_key = f"exp_sim_{qid}"
-            new_exp = st.text_area("Texto da explicação (salvo no banco):", value=q.get("explicacao",""), key=exp_key, height=160)
-            if st.button("Salvar explicação", key=f"save_exp_sim_{qid}"):
-                update_questao_explicacao(qid, new_exp)
+            exp_key = f"exp_sim_{sim_id}_{questao_id}"
+            new_exp = st.text_area("Texto da explicação (salvo no banco):", value=q.get("explicacao", ""), key=exp_key, height=160)
+            if st.button("Salvar explicação", key=f"save_exp_sim_{sim_id}_{questao_id}"):
+                update_questao_explicacao(questao_id, new_exp)
                 st.toast("Explicação atualizada.")
 
+    # Próxima
     if st.button("Próxima ▶", type="primary"):
-        st.session_state["simulado_idx"] = idx + 1
-        for k in [answered_key, result_key, f"vf_sim_{qid}", f"mc_sim_{qid}"]:
+        new_idx = idx + 1
+        new_status = "finished" if new_idx >= len(pool_ids) else "in_progress"
+        update_simulado_progress(sim_id, idx=new_idx, acertos=acertos, status=new_status)
+
+        for k in [answered_key, result_key, f"vf_sim_{sim_id}_{questao_id}", f"mc_sim_{sim_id}_{questao_id}"]:
             if k in st.session_state:
                 del st.session_state[k]
         st.rerun()
+
 
 # =============================
 # Main Navigation
