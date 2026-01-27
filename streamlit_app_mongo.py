@@ -729,8 +729,21 @@ def render_questao(q_row, parent_qid, questao_numero=None):
         # Mostra a explicação junto do feedback (se houver)
         exp_txt = (q_row.get("explicacao") or "").strip()
         if exp_txt:
-            st.markdown("**Explicação:**")
-            st.markdown(exp_txt)
+            st.markdown(
+                f"""
+                <div style="
+                    background-color:#fff8c4;
+                    padding:14px;
+                    border-radius:6px;
+                    border:1px solid #e6d97a;
+                    margin-top:10px;
+                ">
+                    <strong>Explicação:</strong><br><br>
+                    {exp_txt}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
     # ======================
     # EXPLICAÇÃO (sempre aberta, altura fixa)
@@ -1174,8 +1187,21 @@ def page_run_simulado():
 
         exp_txt = (q.get("explicacao") or "").strip()
         if exp_txt:
-            st.markdown("**Explicação:**")
-            st.markdown(exp_txt)
+            st.markdown(
+                f"""
+                <div style="
+                    background-color:#fff8c4;
+                    padding:14px;
+                    border-radius:6px;
+                    border:1px solid #e6d97a;
+                    margin-top:10px;
+                ">
+                    <strong>Explicação:</strong><br><br>
+                    {exp_txt}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
         with st.expander("Ver explicação / editar"):
             exp_key = f"exp_sim_{qid}"
