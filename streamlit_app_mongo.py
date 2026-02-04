@@ -620,6 +620,15 @@ def update_questao_explicacao(questao_id, texto_exp):
     db = get_db()
     db.questoes.update_one({"_id": ObjectId(questao_id)}, {"$set": {"explicacao": texto_exp}})
 
+def update_questao_texto(questao_id, novo_texto):
+    db = get_db()
+    db.questoes.update_one({"_id": ObjectId(questao_id)}, {"$set": {"texto": novo_texto}})
+
+def update_questao_gabarito(questao_id, correta_text):
+    """Atualiza o campo 'correta_text' (VF: 'V'/'F'; MC: 'A'..'E')."""
+    db = get_db()
+    db.questoes.update_one({"_id": ObjectId(questao_id)}, {"$set": {"correta_text": correta_text}})
+
 def popular_caderno_erros():
     """Popula o Caderno de Erros com questões já respondidas incorretamente"""
     db = get_db()
@@ -802,6 +811,38 @@ def render_questao(q_row, parent_qid, questao_numero=None):
     if questao_numero:
         st.markdown(f"#### Questão {questao_numero}")
     st.markdown(f"**{q_row['texto']}**")
+# ======================
+    # EDIÇÃO RÁPIDA (enunciado e gabarito) - direto na resolução
+    # ======================
+    with st.expander("✏️ Editar enunciado / gabarito (nesta questão)", expanded=False):
+        txt_key = f"edit_texto_{qid}"
+        gab_key = f"edit_gab_{qid}"
+
+        novo_texto = st.text_area("Enunciado:", value=q_row.get("texto",""), key=txt_key, height=120)
+
+        if tipo == "VF":
+            gab_opts = ["Verdadeiro", "Falso"]
+            gab_idx = 0 if q_row.get("correta_text") == "V" else 1
+            novo_gab = st.radio("Gabarito:", gab_opts, index=gab_idx, key=gab_key, horizontal=True)
+            nova_correta_text = "V" if novo_gab == "Verdadeiro" else "F"
+        else:
+            alts = [q_row.get("op_a"), q_row.get("op_b"), q_row.get("op_c"), q_row.get("op_d"), q_row.get("op_e")]
+            letras = ["A", "B", "C", "D", "E"]
+            letras_validas = [letras[i] for i, a in enumerate(alts) if a]
+            if not letras_validas:
+                letras_validas = ["A", "B", "C", "D", "E"]
+            idx_sel = letras_validas.index(q_row.get("correta_text")) if q_row.get("correta_text") in letras_validas else 0
+            nova_correta_text = st.selectbox("Gabarito (letra correta):", letras_validas, index=idx_sel, key=gab_key)
+
+        if st.button("Salvar enunciado + gabarito", key=f"save_edit_{qid}"):
+            # Salva apenas o que mudou
+            if (novo_texto or "").strip() != (q_row.get("texto") or "").strip():
+                update_questao_texto(qid, novo_texto)
+            if (nova_correta_text or "").strip() != (q_row.get("correta_text") or "").strip():
+                update_questao_gabarito(qid, nova_correta_text)
+            st.toast("Questão atualizada.")
+            st.rerun()
+
 
     # ======================
     # QUESTÃO VERDADEIRO/FALSO
@@ -938,7 +979,7 @@ def render_questao(q_row, parent_qid, questao_numero=None):
 # Páginas
 # =============================
 def page_dashboard():
-    st.title("📚 Painel de Questionários (Agrupado por Disciplina)")
+    st.title("📚 Painel de Questionários (rápido)")
 
     # Botão para atualizar Caderno de Erros com histórico
     if st.button("📔 Atualizar Caderno de Erros com histórico"):
@@ -951,13 +992,91 @@ def page_dashboard():
 
     st.divider()
 
-    # Caderno de Erros fixado no topo do painel
+    # -------------------------
+    # Helpers: estatísticas em lote (evita 2*N queries)
+    # -------------------------
+    def _bulk_stats(questionario_ids):
+        """Retorna dict: qid(str) -> {total, respondidas, corretas, perc}.
+        Calcula em poucas agregações no MongoDB para ficar leve no Painel.
+        """
+        if not questionario_ids:
+            return {}
+
+        db = get_db()
+        oids = [ObjectId(qid) for qid in questionario_ids]
+
+        # Total de questões por questionário
+        totals_map = {qid: 0 for qid in questionario_ids}
+        try:
+            pipe_tot = [
+                {"$match": {"questionario_id": {"$in": oids}}},
+                {"$group": {"_id": "$questionario_id", "total": {"$sum": 1}}},
+            ]
+            for d in db.questoes.aggregate(pipe_tot):
+                totals_map[str(d["_id"])] = int(d.get("total", 0))
+        except Exception:
+            pass
+
+        # Última resposta por questão -> corretas + respondidas por questionário
+        resp_map = {qid: {"respondidas": 0, "corretas": 0} for qid in questionario_ids}
+        try:
+            pipe_resp = [
+                {"$match": {"questionario_id": {"$in": oids}}},
+                {"$sort": {"respondido_em": 1}},
+                {"$group": {
+                    "_id": {"questionario_id": "$questionario_id", "questao_id": "$questao_id"},
+                    "last_correto": {"$last": "$correto"},
+                }},
+                {"$group": {
+                    "_id": "$_id.questionario_id",
+                    "respondidas": {"$sum": 1},
+                    "corretas": {"$sum": {"$cond": [{"$eq": ["$last_correto", 1]}, 1, 0]}},
+                }},
+            ]
+            for d in db.respostas.aggregate(pipe_resp):
+                qid_str = str(d["_id"])
+                resp_map[qid_str] = {
+                    "respondidas": int(d.get("respondidas", 0)),
+                    "corretas": int(d.get("corretas", 0)),
+                }
+        except Exception:
+            pass
+
+        out = {}
+        for qid in questionario_ids:
+            total = int(totals_map.get(qid, 0))
+            respondidas = int(resp_map.get(qid, {}).get("respondidas", 0))
+            corretas = int(resp_map.get(qid, {}).get("corretas", 0))
+            perc = (corretas / total) * 100 if total > 0 else 0.0
+            out[qid] = {"total": total, "respondidas": respondidas, "corretas": corretas, "perc": perc}
+        return out
+
+    # -------------------------
+    # Carrega metadados (leve) e organiza navegação
+    # -------------------------
     all_qs = get_questionarios()
+    if not all_qs:
+        st.info("Nenhum questionário cadastrado ainda. Vá em **Importar CSV** para começar.")
+        return
+
+    # Identifica especiais
     caderno_erros = next((q for q in all_qs if q["nome"] == "Caderno de Erros"), None)
+
+    # Caderno de Erros fixado no topo (estatística em lote, 1x)
     if caderno_erros:
+        stats_erros = _bulk_stats([caderno_erros["id"]]).get(caderno_erros["id"], {"total": 0, "respondidas": 0, "corretas": 0, "perc": 0.0})
         with st.container(border=True):
             st.subheader("🧨 Caderno de Erros (fixado)")
-            show_desempenho_block(caderno_erros["id"], show_respondidas=True)
+            col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+            with col1:
+                st.metric("Total", stats_erros["total"])
+            with col2:
+                st.metric("Respondidas", stats_erros["respondidas"])
+            with col3:
+                st.metric("Corretas", stats_erros["corretas"])
+            with col4:
+                st.progress(int(stats_erros["perc"]), text=f"Aproveitamento: {stats_erros['perc']:.1f}%")
+
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Praticar Caderno de Erros", key="pr_erros"):
@@ -972,85 +1091,135 @@ def page_dashboard():
 
     st.divider()
 
-    # Demais questionários (sem Caderno de Erros e sem Favoritos)
+    # Demais questionários (exclui especiais para o Painel)
     qs = [q for q in all_qs if q["nome"] not in ("Caderno de Erros", "Favoritos")]
     if not qs:
         st.info("Nenhum questionário cadastrado ainda. Vá em **Importar CSV** para começar.")
         return
 
-    filtro_global = st.text_input("🔎 Buscar por nome de questionário (filtra dentro dos dropdowns)")
+    # Filtros leves (não calcula estatísticas aqui)
+    filtro_global = st.text_input("🔎 Buscar por nome do questionário", key="dash_busca")
+    disciplinas = sorted({(q.get("disciplina") or "Sem Disciplina") for q in qs})
+    escolha_disc = st.selectbox("📦 Disciplina", ["Todas (resumo)"] + disciplinas, key="dash_disciplina")
 
-    # Agrupa por disciplina
-    grupos = {}
-    for q in qs:
-        grupos.setdefault(q["disciplina"] or "Sem Disciplina", []).append(q)
+    # -------------------------
+    # Modo 1: Todas (resumo leve)
+    # - Uma única rodada de agregação para todos os questionários.
+    # - Mostra tabela de disciplinas (não renderiza cards de todos).
+    # -------------------------
+    if escolha_disc == "Todas (resumo)":
+        # Aplica filtro de busca só para reduzir universo se o usuário quiser
+        qs_filtrados = [
+            q for q in qs
+            if (not filtro_global or filtro_global.lower() in q["nome"].lower())
+        ]
 
-    # Render: um card por disciplina, com estatísticas agregadas + dropdown
-    for disc, items in sorted(grupos.items()):
-        with st.container(border=True):
-            st.subheader(f"📦 {disc}")
+        if not qs_filtrados:
+            st.caption("Nenhum questionário corresponde ao filtro.")
+            return
 
-            # Estatísticas agregadas da disciplina (soma de todos os cadernos daquela disciplina)
-            total_disc = 0
-            acertos_disc = 0
-            respondidas_disc = 0
-            for it in items:
-                t, a, _ = desempenho_questionario(it["id"])
-                total_disc += t
-                acertos_disc += a
-                respondidas_disc += respondidas_questionario(it["id"])
-            perc_disc = (acertos_disc / total_disc) * 100 if total_disc > 0 else 0.0
+        qids = [q["id"] for q in qs_filtrados]
+        stats = _bulk_stats(qids)
 
+        # Agrega por disciplina
+        agg = {}
+        for q in qs_filtrados:
+            disc = q.get("disciplina") or "Sem Disciplina"
+            s = stats.get(q["id"], {"total": 0, "respondidas": 0, "corretas": 0})
+            a = agg.setdefault(disc, {"questionarios": 0, "total": 0, "respondidas": 0, "corretas": 0})
+            a["questionarios"] += 1
+            a["total"] += int(s["total"])
+            a["respondidas"] += int(s["respondidas"])
+            a["corretas"] += int(s["corretas"])
+
+        rows = []
+        for disc, a in sorted(agg.items(), key=lambda x: x[0]):
+            perc = (a["corretas"] / a["total"]) * 100 if a["total"] else 0.0
+            rows.append({
+                "Disciplina": disc,
+                "Questionários": a["questionarios"],
+                "Total": a["total"],
+                "Respondidas": a["respondidas"],
+                "Corretas": a["corretas"],
+                "Aproveitamento (%)": round(perc, 1),
+            })
+
+        st.subheader("Resumo por disciplina")
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.caption("Dica: selecione uma disciplina acima para ver e acessar os questionários sem carregar o painel inteiro.")
+        return
+
+    # -------------------------
+    # Modo 2: Uma disciplina (carrega só o necessário)
+    # -------------------------
+    qs_disc = [q for q in qs if (q.get("disciplina") or "Sem Disciplina") == escolha_disc]
+    if filtro_global:
+        qs_disc = [q for q in qs_disc if filtro_global.lower() in q["nome"].lower()]
+
+    if not qs_disc:
+        st.caption("Nenhum questionário nesta disciplina corresponde ao filtro.")
+        return
+
+    # Estatísticas apenas para os questionários desta disciplina (bem mais leve)
+    qids_disc = [q["id"] for q in qs_disc]
+    stats_disc = _bulk_stats(qids_disc)
+
+    # Agregado da disciplina
+    total_disc = sum(stats_disc[qid]["total"] for qid in qids_disc)
+    respondidas_disc = sum(stats_disc[qid]["respondidas"] for qid in qids_disc)
+    corretas_disc = sum(stats_disc[qid]["corretas"] for qid in qids_disc)
+    perc_disc = (corretas_disc / total_disc) * 100 if total_disc else 0.0
+
+    with st.container(border=True):
+        st.subheader(f"📦 {escolha_disc}")
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+        with col1:
+            st.metric("Total (disciplina)", total_disc)
+        with col2:
+            st.metric("Respondidas (disciplina)", respondidas_disc)
+        with col3:
+            st.metric("Corretas (disciplina)", corretas_disc)
+        with col4:
+            st.progress(int(perc_disc), text=f"Aproveitamento da disciplina: {perc_disc:.1f}%")
+
+        st.markdown("---")
+
+        nomes_validos = [q["nome"] for q in qs_disc]
+        sel = st.selectbox("Selecione um questionário", nomes_validos, key="dash_sel_q")
+        escolhido = next((x for x in qs_disc if x["nome"] == sel), None)
+
+        if escolhido:
+            s = stats_disc.get(escolhido["id"], {"total": 0, "respondidas": 0, "corretas": 0, "perc": 0.0})
             col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
             with col1:
-                st.metric("Total (disciplina)", total_disc)
+                st.metric("Total", s["total"])
             with col2:
-                st.metric("Respondidas (disciplina)", respondidas_disc)
+                st.metric("Respondidas", s["respondidas"])
             with col3:
-                st.metric("Corretas (disciplina)", acertos_disc)
+                st.metric("Corretas", s["corretas"])
             with col4:
-                st.progress(int(perc_disc), text=f"Aproveitamento da disciplina: {perc_disc:.1f}%")
+                st.progress(int(s["perc"]), text=f"Aproveitamento: {s['perc']:.1f}%")
 
-            st.markdown("---")
-
-            # Filtro por nome dentro da disciplina
-            nomes_validos = [
-                i["nome"]
-                for i in items
-                if (not filtro_global or filtro_global.lower() in i["nome"].lower())
-            ]
-            if not nomes_validos:
-                st.caption("Nenhum questionário correspondente ao filtro.")
-                continue
-
-            sel = st.selectbox(
-                f"Selecione um questionário de {disc}",
-                nomes_validos,
-                key=f"sel_{disc}",
-            )
-            escolhido = next((x for x in items if x["nome"] == sel), None)
-            if escolhido:
-                show_desempenho_block(escolhido["id"])
-                b1, b2, b3, b4 = st.columns(4)
-                with b1:
-                    if st.button("Praticar", key=f"pr_{escolhido['id']}"):
-                        st.session_state["current_qid"] = escolhido["id"]
-                        st.session_state["go_to"] = "Praticar"
-                        st.rerun()
-                with b2:
-                    if st.button("Gerenciar", key=f"ger_{escolhido['id']}"):
-                        st.session_state["current_qid"] = escolhido["id"]
-                        st.session_state["go_to"] = "Gerenciar"
-                        st.rerun()
-                with b3:
-                    if st.button("Resetar resoluções", key=f"reset_{escolhido['id']}"):
-                        resetar_resolucoes(escolhido["id"])
-                        st.rerun()
-                with b4:
-                    if st.button("Excluir", key=f"del_{escolhido['id']}"):
-                        delete_questionario(escolhido["id"])
-                        st.success(f"Questionário '{escolhido['nome']}' excluído.")
-                        st.rerun()
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                if st.button("Praticar", key=f"pr_{escolhido['id']}"):
+                    st.session_state["current_qid"] = escolhido["id"]
+                    st.session_state["go_to"] = "Praticar"
+                    st.rerun()
+            with b2:
+                if st.button("Gerenciar", key=f"ger_{escolhido['id']}"):
+                    st.session_state["current_qid"] = escolhido["id"]
+                    st.session_state["go_to"] = "Gerenciar"
+                    st.rerun()
+            with b3:
+                if st.button("Resetar resoluções", key=f"reset_{escolhido['id']}"):
+                    resetar_resolucoes(escolhido["id"])
+                    st.rerun()
+            with b4:
+                if st.button("Excluir", key=f"del_{escolhido['id']}"):
+                    delete_questionario(escolhido["id"])
+                    st.success(f"Questionário '{escolhido['nome']}' excluído.")
+                    st.rerun()
 
 def page_praticar():
     st.title("🎯 Praticar")
