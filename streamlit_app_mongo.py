@@ -515,6 +515,70 @@ def delete_simulado(sim_id):
     list_simulados.clear()
 
 
+def _sim_last_correct_map(sim_doc):
+    """Mapeia questao_id -> bool (última resposta no simulado)."""
+    last = {}
+    respostas = sim_doc.get("respostas") or []
+    for r in sorted(respostas, key=lambda x: x.get("respondido_em", "")):
+        qid = str(r.get("questao_id"))
+        if qid:
+            last[qid] = bool(r.get("correto", 0))
+    return last
+
+
+def simulado_stats_by_disciplina(sim_doc):
+    """Tabela de desempenho por disciplina dentro de um simulado."""
+    db = get_db()
+    pool_ids = [str(x) for x in (sim_doc.get("pool_ids") or [])]
+    if not pool_ids:
+        return []
+
+    # Questão -> questionário (lote)
+    try:
+        quest_docs = list(db.questoes.find(
+            {"_id": {"$in": [ObjectId(x) for x in pool_ids]}},
+            {"_id": 1, "questionario_id": 1},
+        ))
+    except Exception:
+        quest_docs = []
+
+    qid_by_quest = {str(d["_id"]): str(d.get("questionario_id")) for d in quest_docs if d.get("questionario_id")}
+
+    # Questionário -> disciplina (lote)
+    qids = list({ObjectId(qid) for qid in qid_by_quest.values() if qid})
+    disc_by_q = {}
+    if qids:
+        for d in db.questionarios.find({"_id": {"$in": qids}}, {"_id": 1, "disciplina": 1}):
+            disc_by_q[str(d["_id"])] = d.get("disciplina") or "Sem Disciplina"
+
+    last_map = _sim_last_correct_map(sim_doc)
+
+    agg = {}
+    for quest_id in pool_ids:
+        qid = qid_by_quest.get(str(quest_id))
+        disc = disc_by_q.get(str(qid), "Sem Disciplina")
+        a = agg.setdefault(disc, {"Disciplina": disc, "Total": 0, "Acertos": 0})
+        a["Total"] += 1
+        if last_map.get(str(quest_id)) is True:
+            a["Acertos"] += 1
+
+    rows = []
+    for disc, a in sorted(agg.items(), key=lambda x: x[0]):
+        total = int(a["Total"])
+        ac = int(a["Acertos"])
+        perc = (ac / total) * 100 if total else 0.0
+        rows.append({"Disciplina": disc, "Total": total, "Acertos": ac, "Aproveitamento (%)": round(perc, 1)})
+    return rows
+
+
+def simulado_overall_stats(sim_doc):
+    total = int(sim_doc.get("total") or len(sim_doc.get("pool_ids") or []) or 0)
+    acertos = int(sim_doc.get("acertos") or 0)
+    perc = (acertos / total) * 100 if total else 0.0
+    return total, acertos, perc
+
+
+
 def get_questionario_progress(questionario_id):
     """Carrega progresso salvo do questionário (pool e índice atual)."""
     db = get_db()
@@ -1397,6 +1461,31 @@ def page_gerenciar():
                         st.write(f"{mark} {l}) {a}")
             else:
                 st.write(f"**Gabarito:** {'Verdadeiro' if r['correta_text']=='V' else 'Falso'}")
+
+            # Edição de gabarito (direto no Gerenciar)
+            st.markdown("**Editar gabarito:**")
+            if r["tipo"] == "MC":
+                alts = [r.get("op_a"), r.get("op_b"), r.get("op_c"), r.get("op_d"), r.get("op_e")]
+                letras = ["A", "B", "C", "D", "E"]
+                letras_validas = [letras[i] for i, a in enumerate(alts) if a]
+                if not letras_validas:
+                    letras_validas = ["A", "B", "C", "D", "E"]
+                idx_sel = letras_validas.index(r.get("correta_text")) if r.get("correta_text") in letras_validas else 0
+                novo_gab = st.selectbox("Letra correta", letras_validas, index=idx_sel, key=f"m_gab_{r['id']}")
+                if st.button("Salvar gabarito", key=f"m_save_gab_{r['id']}"):
+                    update_questao_gabarito(r["id"], novo_gab)
+                    st.toast("Gabarito atualizado.")
+                    st.rerun()
+            else:
+                opts = ["Verdadeiro", "Falso"]
+                idx_sel = 0 if r.get("correta_text") == "V" else 1
+                novo_gab_vf = st.radio("Gabarito", opts, index=idx_sel, key=f"m_gab_{r['id']}", horizontal=True)
+                nova_correta = "V" if novo_gab_vf == "Verdadeiro" else "F"
+                if st.button("Salvar gabarito", key=f"m_save_gab_{r['id']}"):
+                    update_questao_gabarito(r["id"], nova_correta)
+                    st.toast("Gabarito atualizado.")
+                    st.rerun()
+
             st.write("**Explicação (edite abaixo):**")
             exp_key = f"m_exp_{r['id']}"
             new_exp = st.text_area("", value=r.get("explicacao",""), key=exp_key, height=120)
@@ -1473,10 +1562,59 @@ def page_simulado():
                 novo_nome = st.text_input("Renomear", value=sel_sim.get("nome",""), key="rename_sim")
                 if st.button("Salvar nome", key="btn_rename_sim"):
                     update_simulado_nome(sel_sim["id"], novo_nome)
+
                     st.toast("Nome atualizado.")
                     st.rerun()
+
+            # Desempenho visível para simulados finalizados (do simulado selecionado)
+            if sel_sim.get("status") == "finished":
+                sim_doc = get_simulado(sel_sim["id"])
+                if sim_doc:
+                    total_s, acertos_s, perc_s = simulado_overall_stats(sim_doc)
+
+                    st.markdown("### 📊 Desempenho do simulado finalizado")
+                    cA, cB, cC = st.columns([1, 1, 2])
+                    with cA:
+                        st.metric("Total", total_s)
+                    with cB:
+                        st.metric("Acertos", acertos_s)
+                    with cC:
+                        st.progress(int(perc_s), text=f"Aproveitamento: {perc_s:.1f}%")
+
+                    rows_disc = simulado_stats_by_disciplina(sim_doc)
+                    if rows_disc:
+                        st.markdown("#### Desempenho por disciplina (neste simulado)")
+                        st.dataframe(rows_disc, use_container_width=True, hide_index=True)
         else:
             st.caption("Nenhum simulado salvo ainda. Crie um novo abaixo.")
+
+    # Resumo geral dos simulados finalizados (tabela por disciplina)
+    sims_finished = [s for s in (sims or []) if s.get("status") == "finished"]
+    if sims_finished:
+        st.markdown("### 📈 Resumo dos simulados finalizados (por disciplina)")
+        agg = {}
+        for s in sims_finished:
+            sim_doc = get_simulado(s["id"])
+            if not sim_doc:
+                continue
+            rows = simulado_stats_by_disciplina(sim_doc)
+            for r in rows:
+                disc = r["Disciplina"]
+                a = agg.setdefault(disc, {"Disciplina": disc, "Total": 0, "Acertos": 0})
+                a["Total"] += int(r.get("Total", 0))
+                a["Acertos"] += int(r.get("Acertos", 0))
+
+        out_rows = []
+        for disc, a in sorted(agg.items(), key=lambda x: x[0]):
+            total = int(a["Total"])
+            ac = int(a["Acertos"])
+            perc = (ac / total) * 100 if total else 0.0
+            out_rows.append({"Disciplina": disc, "Total": total, "Acertos": ac, "Aproveitamento (%)": round(perc, 1)})
+
+        if out_rows:
+            st.dataframe(out_rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Ainda não há dados suficientes para o resumo por disciplina.")
     qs_all = [q for q in get_questionarios() if q["nome"] != "Favoritos"]
     if not qs_all:
         st.info("Crie ou importe questionários primeiro.")
@@ -1647,6 +1785,11 @@ def page_run_simulado():
         perc = (acertos / total) * 100 if total else 0
         st.success(f"✅ Fim do simulado! Acertos: {acertos}/{total} ({perc:.1f}%).")
         update_simulado_progress(sim_id, status="finished")
+        rows_disc = simulado_stats_by_disciplina(sim)
+        if rows_disc:
+            st.markdown("#### Desempenho por disciplina (neste simulado)")
+            st.dataframe(rows_disc, use_container_width=True, hide_index=True)
+
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Voltar aos simulados", type="primary"):
