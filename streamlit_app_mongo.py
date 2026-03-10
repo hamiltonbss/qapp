@@ -1,7 +1,7 @@
 import os
 import random
 import calendar
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from functools import lru_cache
 
 import streamlit as st
@@ -2199,11 +2199,9 @@ def est_excluir_disciplina(disc_id):
     db = get_db()
     oid = ObjectId(disc_id)
     db.est_assuntos.delete_many({"disciplina_id": oid})
-    db.est_planejamento.update_many(
-        {"disciplina_id": oid},
-        {"$set": {"disciplina_id": None, "disciplina_nome": "(removida)"}}
-    )
+    db.est_planejamento.delete_many({"disciplina_id": oid})
     db.est_disciplinas.delete_one({"_id": oid})
+
 
 # --- Assuntos ---
 def est_listar_assuntos(disc_id):
@@ -2288,6 +2286,81 @@ def est_buscar_planejamento_mes(usuario_login, ano, mes):
             "links": d.get("links", []),
         })
     return por_data
+
+
+def est_buscar_planejamento_periodo(usuario_login, data_inicio, data_fim):
+    db = get_db()
+    ini = str(data_inicio)
+    fim = str(data_fim)
+    docs = list(db.est_planejamento.find({
+        "usuario_login": usuario_login,
+        "data": {"$gte": ini, "$lte": fim}
+    }).sort("data", ASCENDING))
+    por_data = {}
+    for d in docs:
+        key = d["data"]
+        por_data.setdefault(key, []).append({
+            "id": str(d["_id"]),
+            "assunto_id": str(d.get("assunto_id", "")),
+            "disciplina_nome": d.get("disciplina_nome", ""),
+            "assunto_nome": d.get("assunto_nome", ""),
+            "status": d.get("status", "pendente"),
+            "links": d.get("links", []),
+        })
+    return por_data
+
+
+def est_distribuir_assuntos_periodo(usuario_login, disciplina_id, data_inicio, data_fim):
+    db = get_db()
+    if isinstance(data_inicio, datetime):
+        data_inicio = data_inicio.date()
+    if isinstance(data_fim, datetime):
+        data_fim = data_fim.date()
+    if data_fim < data_inicio:
+        return 0, "Período inválido."
+
+    disciplina = db.est_disciplinas.find_one({"_id": ObjectId(disciplina_id)})
+    if not disciplina:
+        return 0, "Disciplina não encontrada."
+
+    assuntos = list(db.est_assuntos.find({"disciplina_id": ObjectId(disciplina_id)}).sort("ordem", ASCENDING))
+    if not assuntos:
+        return 0, "Nenhum assunto cadastrado nesta disciplina."
+
+    datas = []
+    cursor = data_inicio
+    while cursor <= data_fim:
+        datas.append(cursor)
+        cursor += timedelta(days=1)
+
+    if not datas:
+        return 0, "Nenhuma data disponível."
+
+    inseridos = 0
+    for idx, assunto in enumerate(assuntos):
+        data_alvo = datas[idx % len(datas)]
+        data_str = data_alvo.isoformat()
+        existe = db.est_planejamento.find_one({
+            "usuario_login": usuario_login,
+            "data": data_str,
+            "assunto_id": assunto["_id"],
+        })
+        if existe:
+            continue
+        db.est_planejamento.insert_one({
+            "usuario_login": usuario_login,
+            "data": data_str,
+            "assunto_id": assunto["_id"],
+            "disciplina_id": disciplina["_id"],
+            "disciplina_nome": disciplina.get("nome", ""),
+            "assunto_nome": assunto.get("nome", ""),
+            "status": "pendente",
+            "links": [],
+            "data_criacao": datetime.now(timezone.utc).isoformat(),
+        })
+        inseridos += 1
+
+    return inseridos, None
 
 def est_adicionar_link(plano_id, titulo, url):
     db = get_db()
