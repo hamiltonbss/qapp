@@ -1,6 +1,7 @@
 import os
 import random
-from datetime import datetime, timezone
+import calendar
+from datetime import datetime, timezone, date
 from functools import lru_cache
 
 import streamlit as st
@@ -8,6 +9,12 @@ import pandas as pd
 
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson import ObjectId
+
+try:
+    import bcrypt
+    _BCRYPT_OK = True
+except ImportError:
+    _BCRYPT_OK = False
 
 # =============================
 # Config & Globals
@@ -1900,6 +1907,655 @@ def page_run_simulado():
 
 
 # =============================
+# AUTH — helpers de senha
+# =============================
+ADMIN_LOGIN = "hamiltonbss"
+
+def _hash_senha(senha: str) -> str:
+    if _BCRYPT_OK:
+        return bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode()
+    import hashlib
+    return hashlib.sha256(senha.encode()).hexdigest()
+
+def _verificar_senha(senha: str, senha_hash: str) -> bool:
+    if _BCRYPT_OK:
+        try:
+            return bcrypt.checkpw(senha.encode(), senha_hash.encode())
+        except Exception:
+            return False
+    import hashlib
+    return hashlib.sha256(senha.encode()).hexdigest() == senha_hash
+
+# =============================
+# AUTH — banco de dados de usuários
+# =============================
+def init_usuarios(db):
+    """Cria índices e garante que o admin inicial existe."""
+    try:
+        db.usuarios.create_index([("login", ASCENDING)], name="uq_login", unique=True, background=True)
+    except Exception:
+        pass
+    if db.usuarios.count_documents({"login": ADMIN_LOGIN}, limit=1) == 0:
+        db.usuarios.insert_one({
+            "nome": "Administrador",
+            "login": ADMIN_LOGIN,
+            "senha_hash": None,
+            "perfil": "admin",
+            "ativo": True,
+            "primeiro_acesso": True,
+            "data_criacao": datetime.now(timezone.utc).isoformat(),
+            "data_ultima_atualizacao": datetime.now(timezone.utc).isoformat(),
+        })
+
+def get_usuario_por_login(login: str):
+    db = get_db()
+    return db.usuarios.find_one({"login": login.strip().lower()})
+
+def criar_usuario(nome, login, perfil="usuario", criado_por="sistema"):
+    db = get_db()
+    login = login.strip().lower()
+    if db.usuarios.find_one({"login": login}):
+        raise ValueError(f"Login '{login}' já existe.")
+    db.usuarios.insert_one({
+        "nome": nome.strip(),
+        "login": login,
+        "senha_hash": None,
+        "perfil": perfil,
+        "ativo": True,
+        "primeiro_acesso": True,
+        "criado_por": criado_por,
+        "data_criacao": datetime.now(timezone.utc).isoformat(),
+        "data_ultima_atualizacao": datetime.now(timezone.utc).isoformat(),
+    })
+
+def atualizar_senha_usuario(login: str, nova_senha: str, primeiro_acesso=False):
+    db = get_db()
+    db.usuarios.update_one(
+        {"login": login},
+        {"$set": {
+            "senha_hash": _hash_senha(nova_senha),
+            "primeiro_acesso": primeiro_acesso,
+            "data_ultima_atualizacao": datetime.now(timezone.utc).isoformat(),
+        }}
+    )
+
+def listar_usuarios():
+    db = get_db()
+    return list(db.usuarios.find({}, {"_id": 0, "senha_hash": 0}).sort("data_criacao", ASCENDING))
+
+def atualizar_usuario(login, campos: dict):
+    db = get_db()
+    campos["data_ultima_atualizacao"] = datetime.now(timezone.utc).isoformat()
+    db.usuarios.update_one({"login": login}, {"$set": campos})
+
+# =============================
+# AUTH — telas de login / primeiro acesso
+# =============================
+def tela_login():
+    st.title("🔐 Acesso ao Sistema")
+    col, _ = st.columns([1, 2])
+    with col:
+        login_input = st.text_input("Usuário", key="login_input").strip().lower()
+        senha_input = st.text_input("Senha", type="password", key="senha_input")
+        entrar = st.button("Entrar", type="primary")
+
+    if entrar:
+        if not login_input:
+            st.warning("Informe o usuário.")
+            return
+        usuario = get_usuario_por_login(login_input)
+        if not usuario:
+            st.error("Usuário não encontrado.")
+            return
+        if not usuario.get("ativo", True):
+            st.error("Usuário inativo. Contate o administrador.")
+            return
+        if usuario.get("primeiro_acesso") or not usuario.get("senha_hash"):
+            st.session_state["_auth_primeiro_acesso_login"] = login_input
+            st.rerun()
+            return
+        if not _verificar_senha(senha_input, usuario["senha_hash"]):
+            st.error("Senha incorreta.")
+            return
+        # Login OK
+        st.session_state["_auth_usuario"] = {
+            "login": usuario["login"],
+            "nome": usuario.get("nome", ""),
+            "perfil": usuario.get("perfil", "usuario"),
+        }
+        st.rerun()
+
+def tela_primeiro_acesso(login: str):
+    st.title("🔑 Primeiro Acesso — Defina sua senha")
+    st.info(f"Bem-vindo(a), **{login}**! Por segurança, defina uma senha para continuar.")
+    col, _ = st.columns([1, 2])
+    with col:
+        s1 = st.text_input("Nova senha", type="password", key="pa_s1")
+        s2 = st.text_input("Confirmar senha", type="password", key="pa_s2")
+        salvar = st.button("Definir senha", type="primary")
+    if salvar:
+        if len(s1) < 6:
+            st.warning("A senha deve ter pelo menos 6 caracteres.")
+            return
+        if s1 != s2:
+            st.error("As senhas não coincidem.")
+            return
+        atualizar_senha_usuario(login, s1, primeiro_acesso=False)
+        st.success("Senha definida com sucesso! Faça login agora.")
+        del st.session_state["_auth_primeiro_acesso_login"]
+        st.rerun()
+
+def checar_autenticacao():
+    """
+    Retorna True se o usuário está autenticado.
+    Gerencia o fluxo de login / primeiro acesso.
+    """
+    db = get_db()
+    init_usuarios(db)
+
+    if "_auth_primeiro_acesso_login" in st.session_state:
+        tela_primeiro_acesso(st.session_state["_auth_primeiro_acesso_login"])
+        return False
+
+    if "_auth_usuario" not in st.session_state:
+        tela_login()
+        return False
+
+    return True
+
+def auth_sidebar():
+    """Exibe info do usuário e botão logout na sidebar."""
+    u = st.session_state.get("_auth_usuario", {})
+    with st.sidebar:
+        st.caption(f"👤 {u.get('nome', u.get('login', ''))} ({u.get('perfil', '')})")
+        if st.button("Sair", key="btn_logout"):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
+
+def is_admin():
+    return st.session_state.get("_auth_usuario", {}).get("perfil") == "admin"
+
+def login_atual():
+    return st.session_state.get("_auth_usuario", {}).get("login", "")
+
+# =============================
+# GESTÃO DE USUÁRIOS — página admin
+# =============================
+def page_usuarios():
+    if not is_admin():
+        st.error("Acesso restrito a administradores.")
+        return
+    st.title("👥 Gestão de Usuários")
+
+    # ---- Listagem ----
+    usuarios = listar_usuarios()
+    if usuarios:
+        rows = []
+        for u in usuarios:
+            rows.append({
+                "Login": u.get("login",""),
+                "Nome": u.get("nome",""),
+                "Perfil": u.get("perfil",""),
+                "Ativo": "✅" if u.get("ativo") else "❌",
+                "1º Acesso": "⏳" if u.get("primeiro_acesso") else "—",
+                "Criado em": (u.get("data_criacao") or "")[:10],
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum usuário cadastrado.")
+
+    st.divider()
+
+    # ---- Criar novo usuário ----
+    with st.expander("➕ Criar novo usuário", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            novo_nome = st.text_input("Nome completo", key="nu_nome")
+        with c2:
+            novo_login = st.text_input("Login", key="nu_login")
+        with c3:
+            novo_perfil = st.selectbox("Perfil", ["usuario", "admin"], key="nu_perfil")
+        if st.button("Criar usuário", key="btn_criar_usuario"):
+            if not novo_nome or not novo_login:
+                st.warning("Preencha nome e login.")
+            else:
+                try:
+                    criar_usuario(novo_nome, novo_login, novo_perfil, criado_por=login_atual())
+                    st.success(f"Usuário '{novo_login}' criado. O usuário definirá a senha no primeiro acesso.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
+    # ---- Editar / Gerenciar ----
+    if usuarios:
+        st.subheader("Editar usuário")
+        logins = [u["login"] for u in usuarios]
+        sel_login = st.selectbox("Selecionar", logins, key="edit_u_sel")
+        u_sel = next((u for u in usuarios if u["login"] == sel_login), None)
+        if u_sel:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                ed_nome = st.text_input("Nome", value=u_sel.get("nome",""), key="ed_nome")
+            with c2:
+                ed_perfil = st.selectbox("Perfil", ["usuario", "admin"],
+                    index=0 if u_sel.get("perfil","usuario")=="usuario" else 1, key="ed_perfil")
+            with c3:
+                ed_ativo = st.checkbox("Ativo", value=bool(u_sel.get("ativo", True)), key="ed_ativo")
+
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button("Salvar alterações", key="btn_salvar_usuario"):
+                    atualizar_usuario(sel_login, {"nome": ed_nome, "perfil": ed_perfil, "ativo": ed_ativo})
+                    st.success("Usuário atualizado.")
+                    st.rerun()
+            with b2:
+                if st.button("Resetar senha (novo 1º acesso)", key="btn_reset_pw"):
+                    atualizar_usuario(sel_login, {"senha_hash": None, "primeiro_acesso": True})
+                    st.success("Senha resetada. O usuário definirá nova senha no próximo acesso.")
+                    st.rerun()
+            with b3:
+                if sel_login != ADMIN_LOGIN:
+                    nova_pw = st.text_input("Definir senha manualmente", type="password", key="ed_pw")
+                    if st.button("Definir senha", key="btn_def_pw"):
+                        if len(nova_pw) < 6:
+                            st.warning("Mínimo 6 caracteres.")
+                        else:
+                            atualizar_senha_usuario(sel_login, nova_pw, primeiro_acesso=False)
+                            st.success("Senha definida.")
+
+# =============================
+# MÓDULO DE ESTUDOS — banco de dados
+# =============================
+def init_estudos(db):
+    """Cria índices para o módulo de estudos."""
+    try:
+        db.est_disciplinas.create_index([("usuario_login", ASCENDING), ("nome", ASCENDING)], background=True)
+        db.est_assuntos.create_index([("disciplina_id", ASCENDING)], background=True)
+        db.est_planejamento.create_index([("usuario_login", ASCENDING), ("data", ASCENDING)], background=True)
+    except Exception:
+        pass
+
+# --- Disciplinas ---
+def est_listar_disciplinas(usuario_login):
+    db = get_db()
+    return list(db.est_disciplinas.find({"usuario_login": usuario_login}).sort("nome", ASCENDING))
+
+def est_criar_disciplina(usuario_login, nome):
+    db = get_db()
+    nome = nome.strip()
+    if not nome:
+        return None
+    if db.est_disciplinas.find_one({"usuario_login": usuario_login, "nome": nome}):
+        return None  # já existe
+    res = db.est_disciplinas.insert_one({
+        "usuario_login": usuario_login,
+        "nome": nome,
+        "data_criacao": datetime.now(timezone.utc).isoformat(),
+    })
+    return str(res.inserted_id)
+
+def est_excluir_disciplina(disc_id):
+    db = get_db()
+    oid = ObjectId(disc_id)
+    db.est_assuntos.delete_many({"disciplina_id": oid})
+    db.est_planejamento.update_many(
+        {"disciplina_id": oid},
+        {"$set": {"disciplina_id": None, "disciplina_nome": "(removida)"}}
+    )
+    db.est_disciplinas.delete_one({"_id": oid})
+
+# --- Assuntos ---
+def est_listar_assuntos(disc_id):
+    db = get_db()
+    return list(db.est_assuntos.find({"disciplina_id": ObjectId(disc_id)}).sort("ordem", ASCENDING))
+
+def est_importar_assuntos(disc_id, texto_colado):
+    db = get_db()
+    linhas = [l.strip() for l in texto_colado.splitlines() if l.strip()]
+    inseridos = 0
+    for linha in linhas:
+        existe = db.est_assuntos.find_one({"disciplina_id": ObjectId(disc_id), "nome": linha})
+        if not existe:
+            db.est_assuntos.insert_one({
+                "disciplina_id": ObjectId(disc_id),
+                "nome": linha,
+                "ordem": db.est_assuntos.count_documents({"disciplina_id": ObjectId(disc_id)}),
+                "data_criacao": datetime.now(timezone.utc).isoformat(),
+            })
+            inseridos += 1
+    return inseridos
+
+def est_editar_assunto(assunto_id, novo_nome):
+    db = get_db()
+    db.est_assuntos.update_one({"_id": ObjectId(assunto_id)}, {"$set": {"nome": novo_nome.strip()}})
+
+def est_excluir_assunto(assunto_id):
+    db = get_db()
+    db.est_assuntos.delete_one({"_id": ObjectId(assunto_id)})
+    db.est_planejamento.delete_many({"assunto_id": ObjectId(assunto_id)})
+
+# --- Planejamento ---
+def est_alocar_assunto(usuario_login, data_str, assunto_id, disciplina_id, disciplina_nome, assunto_nome):
+    db = get_db()
+    existe = db.est_planejamento.find_one({
+        "usuario_login": usuario_login,
+        "data": data_str,
+        "assunto_id": ObjectId(assunto_id),
+    })
+    if existe:
+        return False
+    db.est_planejamento.insert_one({
+        "usuario_login": usuario_login,
+        "data": data_str,
+        "assunto_id": ObjectId(assunto_id),
+        "disciplina_id": ObjectId(disciplina_id),
+        "disciplina_nome": disciplina_nome,
+        "assunto_nome": assunto_nome,
+        "status": "pendente",
+        "links": [],
+        "data_criacao": datetime.now(timezone.utc).isoformat(),
+    })
+    return True
+
+def est_remover_planejamento(plano_id):
+    db = get_db()
+    db.est_planejamento.delete_one({"_id": ObjectId(plano_id)})
+
+def est_marcar_status(plano_id, status):
+    db = get_db()
+    db.est_planejamento.update_one(
+        {"_id": ObjectId(plano_id)},
+        {"$set": {"status": status, "data_atualizacao": datetime.now(timezone.utc).isoformat()}}
+    )
+
+def est_buscar_planejamento_mes(usuario_login, ano, mes):
+    db = get_db()
+    prefixo = f"{ano:04d}-{mes:02d}"
+    docs = list(db.est_planejamento.find({
+        "usuario_login": usuario_login,
+        "data": {"$regex": f"^{prefixo}"}
+    }))
+    por_data = {}
+    for d in docs:
+        key = d["data"]
+        por_data.setdefault(key, []).append({
+            "id": str(d["_id"]),
+            "assunto_id": str(d.get("assunto_id", "")),
+            "disciplina_nome": d.get("disciplina_nome", ""),
+            "assunto_nome": d.get("assunto_nome", ""),
+            "status": d.get("status", "pendente"),
+            "links": d.get("links", []),
+        })
+    return por_data
+
+def est_adicionar_link(plano_id, titulo, url):
+    db = get_db()
+    db.est_planejamento.update_one(
+        {"_id": ObjectId(plano_id)},
+        {"$push": {"links": {"titulo": titulo, "url": url}}}
+    )
+
+def est_remover_link(plano_id, idx_link):
+    db = get_db()
+    doc = db.est_planejamento.find_one({"_id": ObjectId(plano_id)})
+    if doc:
+        links = doc.get("links", [])
+        if 0 <= idx_link < len(links):
+            links.pop(idx_link)
+            db.est_planejamento.update_one({"_id": ObjectId(plano_id)}, {"$set": {"links": links}})
+
+# =============================
+# MÓDULO DE ESTUDOS — página
+# =============================
+def page_estudos():
+    st.title("📅 Plano de Estudos")
+    usuario = login_atual()
+    db = get_db()
+    init_estudos(db)
+
+    # ---- Navegação de mês ----
+    hoje = date.today()
+    if "est_ano" not in st.session_state:
+        st.session_state["est_ano"] = hoje.year
+    if "est_mes" not in st.session_state:
+        st.session_state["est_mes"] = hoje.month
+
+    ano = st.session_state["est_ano"]
+    mes = st.session_state["est_mes"]
+
+    nav1, nav2, nav3 = st.columns([1, 3, 1])
+    with nav1:
+        if st.button("◀ Mês anterior", key="est_mes_ant"):
+            if mes == 1:
+                st.session_state["est_ano"] = ano - 1
+                st.session_state["est_mes"] = 12
+            else:
+                st.session_state["est_mes"] = mes - 1
+            st.rerun()
+    with nav2:
+        meses_pt = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+                    "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
+        st.markdown(f"<h3 style='text-align:center;margin:0'>{meses_pt[mes-1]} {ano}</h3>", unsafe_allow_html=True)
+    with nav3:
+        if st.button("Próximo mês ▶", key="est_mes_prox"):
+            if mes == 12:
+                st.session_state["est_ano"] = ano + 1
+                st.session_state["est_mes"] = 1
+            else:
+                st.session_state["est_mes"] = mes + 1
+            st.rerun()
+
+    st.divider()
+
+    # ---- Layout: calendário (esq) + painel (dir) ----
+    col_cal, col_painel = st.columns([3, 1])
+
+    # ========== PAINEL LATERAL ==========
+    with col_painel:
+        st.subheader("📚 Disciplinas & Assuntos")
+
+        disciplinas = est_listar_disciplinas(usuario)
+
+        # Nova disciplina
+        with st.expander("➕ Nova disciplina"):
+            nd = st.text_input("Nome", key="est_nd_nome")
+            if st.button("Criar", key="est_btn_criar_disc"):
+                if nd.strip():
+                    res = est_criar_disciplina(usuario, nd.strip())
+                    if res:
+                        st.success("Criada!")
+                        st.rerun()
+                    else:
+                        st.warning("Já existe ou nome inválido.")
+
+        if not disciplinas:
+            st.info("Nenhuma disciplina ainda.")
+        else:
+            disc_nomes = {str(d["_id"]): d["nome"] for d in disciplinas}
+            disc_sel_id = st.selectbox(
+                "Disciplina",
+                list(disc_nomes.keys()),
+                format_func=lambda x: disc_nomes[x],
+                key="est_disc_sel"
+            )
+            disc_sel_nome = disc_nomes.get(disc_sel_id, "")
+
+            # Importar assuntos
+            with st.expander("📥 Importar assuntos (um por linha)"):
+                texto_col = st.text_area("Cole aqui:", height=120, key="est_import_txt")
+                if st.button("Importar", key="est_btn_import"):
+                    if texto_col.strip():
+                        n = est_importar_assuntos(disc_sel_id, texto_col)
+                        st.success(f"{n} assunto(s) importado(s).")
+                        st.rerun()
+
+            # Listar assuntos
+            assuntos = est_listar_assuntos(disc_sel_id)
+            st.caption(f"**{len(assuntos)} assunto(s)** — selecione para alocar no calendário")
+
+            # Seleção de dia destino
+            dia_sel = st.number_input(
+                "Alocar no dia:",
+                min_value=1,
+                max_value=calendar.monthrange(ano, mes)[1],
+                value=min(hoje.day, calendar.monthrange(ano, mes)[1]) if (ano == hoje.year and mes == hoje.month) else 1,
+                step=1,
+                key="est_dia_sel"
+            )
+
+            for a in assuntos:
+                aid = str(a["_id"])
+                c1, c2, c3 = st.columns([4, 1, 1])
+                with c1:
+                    # Edição inline
+                    edit_key = f"est_edit_{aid}"
+                    if st.session_state.get(f"est_editando_{aid}"):
+                        novo_nome = st.text_input("", value=a["nome"], key=edit_key, label_visibility="collapsed")
+                        if st.button("💾", key=f"est_salvar_{aid}"):
+                            est_editar_assunto(aid, novo_nome)
+                            del st.session_state[f"est_editando_{aid}"]
+                            st.rerun()
+                    else:
+                        st.write(a["nome"])
+                with c2:
+                    if st.button("✏️", key=f"est_e_{aid}"):
+                        st.session_state[f"est_editando_{aid}"] = True
+                        st.rerun()
+                with c3:
+                    if st.button("📌", key=f"est_alocar_{aid}", help="Alocar no dia selecionado"):
+                        data_str = f"{ano:04d}-{mes:02d}-{int(dia_sel):02d}"
+                        ok = est_alocar_assunto(
+                            usuario, data_str,
+                            aid, disc_sel_id,
+                            disc_sel_nome, a["nome"]
+                        )
+                        if ok:
+                            st.success(f"Alocado em {data_str}")
+                            st.rerun()
+                        else:
+                            st.warning("Já alocado neste dia.")
+
+            # Excluir assunto
+            with st.expander("🗑️ Excluir assunto"):
+                if assuntos:
+                    a_del_id = st.selectbox(
+                        "Assunto",
+                        [str(a["_id"]) for a in assuntos],
+                        format_func=lambda x: next((a["nome"] for a in assuntos if str(a["_id"])==x), x),
+                        key="est_a_del"
+                    )
+                    if st.button("Excluir assunto", key="est_btn_del_a"):
+                        est_excluir_assunto(a_del_id)
+                        st.rerun()
+
+            # Excluir disciplina
+            with st.expander("🗑️ Excluir disciplina"):
+                st.warning("Remove disciplina e todos os assuntos relacionados.")
+                if st.button("Excluir disciplina", key="est_btn_del_disc"):
+                    est_excluir_disciplina(disc_sel_id)
+                    st.rerun()
+
+    # ========== CALENDÁRIO ==========
+    with col_cal:
+        planejamento = est_buscar_planejamento_mes(usuario, ano, mes)
+
+        primeiro_dia_semana, total_dias = calendar.monthrange(ano, mes)
+        # weekday() retorna 0=seg … 6=dom; queremos começar na segunda
+        dias_semana = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+
+        # Cabeçalho
+        header_cols = st.columns(7)
+        for i, d in enumerate(dias_semana):
+            header_cols[i].markdown(
+                f"<div style='text-align:center;font-weight:bold;color:#19747E'>{d}</div>",
+                unsafe_allow_html=True
+            )
+
+        # Grade
+        dia_atual = 1
+        semana_offset = primeiro_dia_semana  # 0=seg … 6=dom
+
+        while dia_atual <= total_dias:
+            row_cols = st.columns(7)
+            for col_i in range(7):
+                if semana_offset > 0:
+                    semana_offset -= 1
+                    row_cols[col_i].write("")
+                elif dia_atual > total_dias:
+                    row_cols[col_i].write("")
+                else:
+                    data_str = f"{ano:04d}-{mes:02d}-{dia_atual:02d}"
+                    itens = planejamento.get(data_str, [])
+                    eh_hoje = (date(ano, mes, dia_atual) == hoje)
+
+                    # Cor do quadrado
+                    if itens:
+                        todos_ok = all(i["status"] == "estudado" for i in itens)
+                        bg = "#d4edda" if todos_ok else "#fff3cd"
+                    else:
+                        bg = "#f8f9fa"
+
+                    borda = "2px solid #19747E" if eh_hoje else "1px solid #dee2e6"
+
+                    with row_cols[col_i]:
+                        # Cabeçalho do dia
+                        st.markdown(
+                            f"<div style='background:{bg};border:{borda};border-radius:8px;"
+                            f"padding:4px 6px;min-height:80px'>"
+                            f"<b style='font-size:13px'>{'📌 ' if eh_hoje else ''}{dia_atual}</b>",
+                            unsafe_allow_html=True
+                        )
+                        # Itens do dia
+                        for item in itens:
+                            cor_item = "#28a745" if item["status"] == "estudado" else "#856404"
+                            st.markdown(
+                                f"<div style='font-size:10px;color:{cor_item};"
+                                f"border-left:3px solid {cor_item};padding-left:4px;margin:2px 0'>"
+                                f"<b>{item['disciplina_nome'][:12]}</b><br>{item['assunto_nome'][:20]}"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+                        st.markdown("</div>", unsafe_allow_html=True)
+
+                        # Ações do dia (expander)
+                        if itens:
+                            with st.expander(f"⚙️ Dia {dia_atual}", expanded=False):
+                                for item in itens:
+                                    st.markdown(f"**{item['disciplina_nome']}** — {item['assunto_nome']}")
+
+                                    c1, c2 = st.columns([2, 1])
+                                    with c1:
+                                        novo_status = "estudado" if item["status"] != "estudado" else "pendente"
+                                        label_btn = "✅ Marcar estudado" if item["status"] != "estudado" else "↩️ Desfazer"
+                                        if st.button(label_btn, key=f"est_mk_{item['id']}"):
+                                            est_marcar_status(item["id"], novo_status)
+                                            st.rerun()
+                                    with c2:
+                                        if st.button("🗑️ Remover", key=f"est_rm_{item['id']}"):
+                                            est_remover_planejamento(item["id"])
+                                            st.rerun()
+
+                                    # Links
+                                    for li, lnk in enumerate(item.get("links", [])):
+                                        st.markdown(f"🔗 [{lnk['titulo']}]({lnk['url']})")
+                                        if st.button("❌", key=f"est_rl_{item['id']}_{li}"):
+                                            est_remover_link(item["id"], li)
+                                            st.rerun()
+
+                                    with st.form(key=f"est_add_link_{item['id']}"):
+                                        lt = st.text_input("Título do link", key=f"est_lt_{item['id']}")
+                                        lu = st.text_input("URL", key=f"est_lu_{item['id']}")
+                                        if st.form_submit_button("Adicionar link"):
+                                            if lt and lu:
+                                                est_adicionar_link(item["id"], lt, lu)
+                                                st.rerun()
+                                    st.divider()
+
+                    dia_atual += 1
+
+
+# =============================
 # Main Navigation
 # =============================
 def main():
@@ -1909,17 +2565,29 @@ def main():
             st.stop()
         st.session_state["db_checked"] = True
         init_db()
-    
+
+    # ---- Autenticação ----
+    if not checar_autenticacao():
+        st.stop()
+
+    auth_sidebar()
+
     st.session_state.setdefault("nav_choice", "Painel")
     if "go_to" in st.session_state:
         st.session_state["nav_choice"] = st.session_state.pop("go_to")
 
+    nav_pages = ["Painel", "Plano de Estudos", "Praticar", "Gerenciar", "Importar CSV", "Simulados"]
+    if is_admin():
+        nav_pages.append("Usuários")
+
     with st.sidebar:
         st.header("Navegação")
-        choice = st.radio("Ir para", ["Painel", "Praticar", "Gerenciar", "Importar CSV", "Simulados"], key="nav_choice")
+        choice = st.radio("Ir para", nav_pages, key="nav_choice")
 
     if choice == "Painel":
         page_dashboard()
+    elif choice == "Plano de Estudos":
+        page_estudos()
     elif choice == "Praticar":
         page_praticar()
     elif choice == "Gerenciar":
@@ -1931,6 +2599,8 @@ def main():
             page_run_simulado()
         else:
             page_simulado()
+    elif choice == "Usuários":
+        page_usuarios()
 
 if __name__ == "__main__":
     main()
