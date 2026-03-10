@@ -2176,7 +2176,7 @@ def init_estudos(db):
     except Exception:
         pass
 
-# --- Planos de estudo ---
+# --- Planos ---
 def est_listar_planos(usuario_login):
     db = get_db()
     return list(db.est_planos.find({"usuario_login": usuario_login}).sort("data_criacao", ASCENDING))
@@ -2198,7 +2198,6 @@ def est_criar_plano(usuario_login, nome):
 def est_excluir_plano(plano_id):
     db = get_db()
     oid = ObjectId(plano_id)
-    # Busca disciplinas do plano para excluir assuntos
     discs = list(db.est_disciplinas.find({"plano_id": oid}, {"_id": 1}))
     for d in discs:
         db.est_assuntos.delete_many({"disciplina_id": d["_id"]})
@@ -2210,7 +2209,7 @@ def est_renomear_plano(plano_id, novo_nome):
     db = get_db()
     db.est_planos.update_one({"_id": ObjectId(plano_id)}, {"$set": {"nome": novo_nome.strip()}})
 
-# --- Disciplinas (agora por plano) ---
+# --- Disciplinas ---
 def est_listar_disciplinas(plano_id):
     db = get_db()
     return list(db.est_disciplinas.find({"plano_id": ObjectId(plano_id)}).sort("nome", ASCENDING))
@@ -2238,19 +2237,21 @@ def est_excluir_disciplina(disc_id):
 
 # --- Assuntos ---
 def est_listar_assuntos(disc_id):
+    """Retorna assuntos preservando ordem de inserção (campo 'ordem')."""
     db = get_db()
-    return list(db.est_assuntos.find({"disciplina_id": ObjectId(disc_id)}).sort("ordem", ASCENDING))
+    return list(db.est_assuntos.find({"disciplina_id": ObjectId(disc_id)}).sort([("ordem", ASCENDING), ("_id", ASCENDING)]))
 
 def est_importar_assuntos(disc_id, texto_colado):
     db = get_db()
     linhas = [l.strip() for l in texto_colado.splitlines() if l.strip()]
     inseridos = 0
-    for linha in linhas:
+    base_ordem = db.est_assuntos.count_documents({"disciplina_id": ObjectId(disc_id)})
+    for i, linha in enumerate(linhas):
         if not db.est_assuntos.find_one({"disciplina_id": ObjectId(disc_id), "nome": linha}):
             db.est_assuntos.insert_one({
                 "disciplina_id": ObjectId(disc_id),
                 "nome": linha,
-                "ordem": db.est_assuntos.count_documents({"disciplina_id": ObjectId(disc_id)}),
+                "ordem": base_ordem + i,
                 "data_criacao": datetime.now(timezone.utc).isoformat(),
             })
             inseridos += 1
@@ -2265,7 +2266,7 @@ def est_excluir_assunto(assunto_id):
     db.est_assuntos.delete_one({"_id": ObjectId(assunto_id)})
     db.est_planejamento.delete_many({"assunto_id": ObjectId(assunto_id)})
 
-# --- Planejamento (agora por plano_id) ---
+# --- Planejamento ---
 def est_alocar_assunto(plano_id, data_str, assunto_id, disciplina_id, disciplina_nome, assunto_nome):
     db = get_db()
     existe = db.est_planejamento.find_one({
@@ -2282,22 +2283,93 @@ def est_alocar_assunto(plano_id, data_str, assunto_id, disciplina_id, disciplina
         "disciplina_id": ObjectId(disciplina_id),
         "disciplina_nome": disciplina_nome,
         "assunto_nome": assunto_nome,
+        "tipo": "assunto",          # assunto | atividade | revisao
         "status": "pendente",
         "links": [],
         "data_criacao": datetime.now(timezone.utc).isoformat(),
     })
     return True
 
+def est_realocar_assunto(item_id, nova_data_str):
+    """Move um item planejado para outra data."""
+    db = get_db()
+    db.est_planejamento.update_one(
+        {"_id": ObjectId(item_id)},
+        {"$set": {"data": nova_data_str, "data_atualizacao": datetime.now(timezone.utc).isoformat()}}
+    )
+
+def est_adicionar_atividade(plano_id, data_str, titulo, descricao=""):
+    """Adiciona atividade manual (não vinculada a assunto/disciplina)."""
+    db = get_db()
+    db.est_planejamento.insert_one({
+        "plano_id": ObjectId(plano_id),
+        "data": data_str,
+        "assunto_id": None,
+        "disciplina_id": None,
+        "disciplina_nome": "",
+        "assunto_nome": titulo.strip(),
+        "descricao": descricao.strip(),
+        "tipo": "atividade",
+        "status": "pendente",
+        "links": [],
+        "data_criacao": datetime.now(timezone.utc).isoformat(),
+    })
+
+def est_agendar_revisoes(plano_id, item_id, intervalos=None):
+    """
+    Agenda revisões espaçadas a partir do item original.
+    intervalos: lista de dias após a data do item original. Ex: [1, 7, 30]
+    """
+    from datetime import timedelta
+    if intervalos is None:
+        intervalos = [1, 7, 30]
+    db = get_db()
+    origem = db.est_planejamento.find_one({"_id": ObjectId(item_id)})
+    if not origem:
+        return 0
+    data_base = datetime.strptime(origem["data"], "%Y-%m-%d").date()
+    agendadas = 0
+    for dias in intervalos:
+        data_rev = data_base + timedelta(days=dias)
+        data_str = data_rev.strftime("%Y-%m-%d")
+        # Evita duplicar revisão do mesmo assunto no mesmo dia
+        ja_existe = db.est_planejamento.find_one({
+            "plano_id": ObjectId(plano_id),
+            "data": data_str,
+            "assunto_id": origem.get("assunto_id"),
+            "tipo": "revisao",
+        })
+        if not ja_existe:
+            db.est_planejamento.insert_one({
+                "plano_id": ObjectId(plano_id),
+                "data": data_str,
+                "assunto_id": origem.get("assunto_id"),
+                "disciplina_id": origem.get("disciplina_id"),
+                "disciplina_nome": origem.get("disciplina_nome", ""),
+                "assunto_nome": origem.get("assunto_nome", ""),
+                "tipo": "revisao",
+                "status": "pendente",
+                "links": [],
+                "revisao_origem_id": item_id,
+                "revisao_dias": dias,
+                "data_criacao": datetime.now(timezone.utc).isoformat(),
+            })
+            agendadas += 1
+    return agendadas
+
 def est_remover_planejamento(item_id):
     db = get_db()
     db.est_planejamento.delete_one({"_id": ObjectId(item_id)})
 
-def est_marcar_status(item_id, status):
+def est_marcar_status(item_id, status, plano_id=None, agendar_revisoes_auto=False, intervalos_revisao=None):
     db = get_db()
     db.est_planejamento.update_one(
         {"_id": ObjectId(item_id)},
         {"$set": {"status": status, "data_atualizacao": datetime.now(timezone.utc).isoformat()}}
     )
+    # Se marcou como estudado e revisão automática está ativa
+    if status == "estudado" and agendar_revisoes_auto and plano_id:
+        est_agendar_revisoes(plano_id, item_id, intervalos_revisao)
 
 def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
     db = get_db()
@@ -2312,31 +2384,31 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
         key = d["data"]
         por_data.setdefault(key, []).append({
             "id": str(d["_id"]),
-            "assunto_id": str(d.get("assunto_id", "")),
+            "assunto_id": str(d.get("assunto_id", "")) if d.get("assunto_id") else "",
             "disciplina_nome": d.get("disciplina_nome", ""),
             "assunto_nome": d.get("assunto_nome", ""),
+            "descricao": d.get("descricao", ""),
+            "tipo": d.get("tipo", "assunto"),
             "status": d.get("status", "pendente"),
             "links": d.get("links", []),
+            "disciplina_id": str(d.get("disciplina_id", "")) if d.get("disciplina_id") else "",
         })
     return por_data
 
 def est_distribuir_disciplina(plano_id, disc_id, disc_nome, data_inicio, data_fim,
                                dias_semana_ativos=None, intervalo=1):
     """
-    Distribui assuntos da disciplina no período.
-    intervalo=1 -> dias consecutivos disponíveis
-    intervalo=2 -> um dia sim, um dia não (pula 1 dia entre alocações)
-    intervalo=N -> aloca, pula N-1, aloca, pula N-1...
+    Distribui assuntos preservando ordem de importação.
+    intervalo=1 → consecutivo | 2 → um dia sim, um não | N → pula N-1 dias entre alocações.
     """
     from datetime import timedelta
-    assuntos = est_listar_assuntos(disc_id)
+    assuntos = est_listar_assuntos(disc_id)   # já ordenado por 'ordem'
     if not assuntos:
         return 0, 0
 
     if dias_semana_ativos is None:
         dias_semana_ativos = list(range(7))
 
-    # Monta lista de todos dias disponíveis (filtrado por dia da semana)
     dias_base = []
     d = data_inicio
     while d <= data_fim:
@@ -2347,7 +2419,6 @@ def est_distribuir_disciplina(plano_id, disc_id, disc_nome, data_inicio, data_fi
     if not dias_base:
         return 0, 0
 
-    # Aplica intervalo: pega dias_base[0], dias_base[intervalo], dias_base[2*intervalo]...
     intervalo = max(1, int(intervalo))
     dias_disponiveis = dias_base[::intervalo]
 
@@ -2392,25 +2463,26 @@ def _semana_inicio_fim(ref):
     domingo = segunda + timedelta(days=6)
     return segunda, domingo
 
+def _badge(tipo):
+    return {"assunto": "", "atividade": "🔧", "revisao": "🔁"}.get(tipo, "")
+
+def _cor_tipo(tipo):
+    return {"assunto": "#19747E", "atividade": "#6f42c1", "revisao": "#0d6efd"}.get(tipo, "#19747E")
+
 # =============================
 # MÓDULO DE ESTUDOS — tela inicial (lista de planos)
 # =============================
 def page_estudos():
-    from datetime import timedelta
     st.title("📅 Plano de Estudos")
     usuario = login_atual()
     db = get_db()
     init_estudos(db)
 
-    # Se há um plano aberto, vai direto para ele
-    plano_aberto_id = st.session_state.get("est_plano_aberto_id")
-    if plano_aberto_id:
-        _page_estudos_plano(plano_aberto_id)
+    if st.session_state.get("est_plano_aberto_id"):
+        _page_estudos_plano(st.session_state["est_plano_aberto_id"])
         return
 
-    # ---- Tela inicial: lista de planos ----
     st.subheader("Seus planos de estudo")
-
     planos = est_listar_planos(usuario)
 
     if not planos:
@@ -2492,9 +2564,10 @@ def _page_estudos_plano(plano_id):
 
     plano_nome = plano_doc.get("nome", "Plano")
     usuario = login_atual()
+    hoje = date.today()
 
-    # Cabeçalho com botão voltar
-    col_back, col_title = st.columns([1, 6])
+    # Cabeçalho
+    col_back, col_title = st.columns([1, 7])
     with col_back:
         if st.button("← Voltar", key="est_voltar_planos"):
             st.session_state.pop("est_plano_aberto_id", None)
@@ -2502,16 +2575,31 @@ def _page_estudos_plano(plano_id):
     with col_title:
         st.title(f"📋 {plano_nome}")
 
-    hoje = date.today()
+    # Configurações de revisão (na sidebar do plano)
+    with st.sidebar:
+        st.divider()
+        st.markdown("**⚙️ Revisão automática**")
+        rev_auto = st.checkbox("Agendar revisões ao marcar estudado",
+                               value=st.session_state.get("est_rev_auto", False),
+                               key="est_rev_auto")
+        if rev_auto:
+            st.caption("Intervalos (dias após o estudo):")
+            rev_d1 = st.number_input("1ª revisão", min_value=1, max_value=90, value=1, step=1, key="est_rev_d1")
+            rev_d2 = st.number_input("2ª revisão", min_value=1, max_value=180, value=7, step=1, key="est_rev_d2")
+            rev_d3 = st.number_input("3ª revisão", min_value=1, max_value=365, value=30, step=1, key="est_rev_d3")
+            intervalos_rev = sorted({int(rev_d1), int(rev_d2), int(rev_d3)})
+        else:
+            intervalos_rev = []
+
+    # Navegação semanal
     if "est_semana_ref" not in st.session_state:
         st.session_state["est_semana_ref"] = hoje
 
     ref = st.session_state["est_semana_ref"]
     segunda, domingo = _semana_inicio_fim(ref)
 
-    # Navegação semanal
-    nav1, nav2, nav3, nav4 = st.columns([1, 1, 3, 1])
     meses_pt = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"]
+    nav1, nav2, nav3, nav4 = st.columns([1, 1, 3, 1])
     with nav1:
         if st.button("◀ Anterior", key="est_sem_ant"):
             st.session_state["est_semana_ref"] = segunda - timedelta(days=7)
@@ -2539,7 +2627,6 @@ def _page_estudos_plano(plano_id):
     # ========== PAINEL LATERAL ==========
     with col_painel:
         st.subheader("📚 Disciplinas")
-
         disciplinas = est_listar_disciplinas(plano_id)
 
         with st.expander("➕ Nova disciplina"):
@@ -2553,9 +2640,7 @@ def _page_estudos_plano(plano_id):
                     else:
                         st.warning("Já existe ou nome inválido.")
 
-        if not disciplinas:
-            st.info("Nenhuma disciplina ainda.")
-        else:
+        if disciplinas:
             disc_nomes = {str(d["_id"]): d["nome"] for d in disciplinas}
             disc_sel_id = st.selectbox(
                 "Disciplina ativa",
@@ -2565,7 +2650,6 @@ def _page_estudos_plano(plano_id):
             )
             disc_sel_nome = disc_nomes.get(disc_sel_id, "")
 
-            # ---- Importar assuntos ----
             with st.expander("📥 Importar assuntos (um por linha)"):
                 texto_col = st.text_area("Cole aqui:", height=110, key="est_import_txt")
                 if st.button("Importar", key="est_btn_import"):
@@ -2574,34 +2658,26 @@ def _page_estudos_plano(plano_id):
                         st.success(f"{n} assunto(s) importado(s).")
                         st.rerun()
 
-            # ---- Distribuição automática ----
             with st.expander("🗓️ Distribuir todos os assuntos"):
-                st.caption("Distribui os assuntos intercalados no período configurado.")
+                st.caption("Distribui na ordem de importação, com intervalo configurável.")
                 d_ini = st.date_input("Data início", value=segunda, key="est_dist_ini")
                 d_fim = st.date_input("Data fim", value=segunda + timedelta(days=29), key="est_dist_fim")
-
                 intervalo_val = st.number_input(
                     "Intervalo entre alocações (dias)",
-                    min_value=1, max_value=30, value=1, step=1,
-                    key="est_dist_intervalo",
-                    help="1 = dias consecutivos | 2 = um dia sim, um não | 3 = aloca, pula 2, aloca..."
+                    min_value=1, max_value=30, value=1, step=1, key="est_dist_intervalo",
+                    help="1=consecutivo | 2=um dia sim, um não | 3=aloca, pula 2, aloca…"
                 )
-
                 dias_labels = ["Seg","Ter","Qua","Qui","Sex","Sáb","Dom"]
                 dias_sel = st.multiselect(
                     "Dias da semana permitidos",
-                    options=list(range(7)),
-                    default=list(range(5)),
-                    format_func=lambda x: dias_labels[x],
-                    key="est_dist_dias"
+                    options=list(range(7)), default=list(range(5)),
+                    format_func=lambda x: dias_labels[x], key="est_dist_dias"
                 )
-
                 assuntos_preview = est_listar_assuntos(disc_sel_id)
-                st.caption(f"{len(assuntos_preview)} assunto(s) serão distribuídos.")
-
+                st.caption(f"{len(assuntos_preview)} assunto(s) serão distribuídos na ordem de importação.")
                 if st.button("Distribuir", key="est_btn_distribuir", type="primary"):
                     if not dias_sel:
-                        st.warning("Selecione ao menos um dia da semana.")
+                        st.warning("Selecione ao menos um dia.")
                     elif d_fim < d_ini:
                         st.warning("Data fim deve ser maior que data início.")
                     else:
@@ -2616,7 +2692,7 @@ def _page_estudos_plano(plano_id):
                         if alocados:
                             st.rerun()
 
-            # ---- Assuntos em dropdown ----
+            # Assuntos em dropdown
             assuntos = est_listar_assuntos(disc_sel_id)
             st.caption(f"**{len(assuntos)} assunto(s)**")
 
@@ -2630,7 +2706,6 @@ def _page_estudos_plano(plano_id):
                 )
                 assunto_sel_nome = assunto_opcoes.get(assunto_sel_id, "")
 
-                # Editar assunto selecionado
                 with st.expander("✏️ Editar assunto selecionado"):
                     novo_nome_a = st.text_input("Nome", value=assunto_sel_nome, key="est_edit_assunto_nome")
                     c1, c2 = st.columns(2)
@@ -2645,8 +2720,7 @@ def _page_estudos_plano(plano_id):
                             est_excluir_assunto(assunto_sel_id)
                             st.rerun()
 
-                # Alocar no dia
-                st.markdown("**Alocar no dia:**")
+                st.markdown("**Alocar assunto no dia:**")
                 dia_sel = st.date_input("", value=hoje, key="est_dia_sel", label_visibility="collapsed")
                 if st.button("📌 Alocar", key="est_btn_alocar", use_container_width=True):
                     ok = est_alocar_assunto(
@@ -2659,7 +2733,6 @@ def _page_estudos_plano(plano_id):
                     else:
                         st.warning("Já alocado neste dia.")
 
-            # ---- Excluir disciplina ----
             with st.expander("🗑️ Excluir disciplina"):
                 st.warning("Remove a disciplina, assuntos e planejamentos vinculados.")
                 confirma = st.checkbox(f'Confirmo exclusão de "{disc_sel_nome}"', key="est_conf_del_disc")
@@ -2667,6 +2740,31 @@ def _page_estudos_plano(plano_id):
                     est_excluir_disciplina(disc_sel_id)
                     st.success("Disciplina excluída.")
                     st.rerun()
+        else:
+            st.info("Nenhuma disciplina ainda.")
+
+        # ---- Revisão manual ----
+        st.divider()
+        st.subheader("🔁 Revisão manual")
+        st.caption("Agenda revisões para um assunto já alocado.")
+        rev_item_id = st.text_input("ID do item (copie do ícone 🆔)", key="est_rev_item_id",
+                                    placeholder="Cole o ID aqui")
+        rev_intervalos_txt = st.text_input("Intervalos (dias, separados por vírgula)",
+                                           value="1, 7, 30", key="est_rev_intervalos")
+        if st.button("Agendar revisões", key="est_btn_rev_manual"):
+            if rev_item_id.strip():
+                try:
+                    ivs = [int(x.strip()) for x in rev_intervalos_txt.split(",") if x.strip().isdigit()]
+                    if ivs:
+                        n_rev = est_agendar_revisoes(plano_id, rev_item_id.strip(), ivs)
+                        st.success(f"{n_rev} revisão(ões) agendada(s).")
+                        st.rerun()
+                    else:
+                        st.warning("Informe ao menos um intervalo válido.")
+                except Exception as e:
+                    st.error(f"Erro: {e}")
+            else:
+                st.warning("Informe o ID do item.")
 
     # ========== AGENDA SEMANAL ==========
     with col_agenda:
@@ -2680,75 +2778,131 @@ def _page_estudos_plano(plano_id):
             itens = planejamento.get(data_str, [])
             eh_hoje = (dia_date == hoje)
 
-            n_ok = sum(1 for i in itens if i["status"] == "estudado")
+            n_ok   = sum(1 for i in itens if i["status"] == "estudado")
             n_pend = len(itens) - n_ok
 
             if itens:
                 bg_header = "#d4edda" if n_pend == 0 else "#fff3cd"
-                icone = "✅" if n_pend == 0 else ("⏳" if n_ok > 0 else "📖")
+                icone_dia = "✅" if n_pend == 0 else ("⏳" if n_ok > 0 else "📖")
             else:
                 bg_header = "#f0f2f6"
-                icone = ""
+                icone_dia = ""
 
             borda_cor = "#19747E" if eh_hoje else "#dee2e6"
             borda_esp = "3px" if eh_hoje else "1px"
-            hoje_tag = " 📌 <b>HOJE</b>" if eh_hoje else ""
-            resumo_tag = f"&nbsp;·&nbsp;{len(itens)} assunto(s)" if itens else "&nbsp;·&nbsp;livre"
+            hoje_tag  = " 📌 <b>HOJE</b>" if eh_hoje else ""
+            resumo    = f"&nbsp;·&nbsp;{len(itens)} item(ns)" if itens else "&nbsp;·&nbsp;livre"
 
             st.markdown(
                 f"<div style='background:{bg_header};border:{borda_esp} solid {borda_cor};"
                 f"border-radius:10px;padding:8px 14px;margin-bottom:4px'>"
                 f"<span style='font-size:15px;font-weight:bold;color:#19747E'>"
-                f"{icone} {dias_semana_nomes[offset]}, {dia_date.day:02d}/{dia_date.month:02d}"
+                f"{icone_dia} {dias_semana_nomes[offset]}, {dia_date.day:02d}/{dia_date.month:02d}"
                 f"{hoje_tag}</span>"
-                f"<span style='font-size:12px;color:#555'> {resumo_tag}</span>"
+                f"<span style='font-size:12px;color:#555'> {resumo}</span>"
                 f"</div>",
                 unsafe_allow_html=True
             )
 
-            if not itens:
-                st.caption("  Nenhum assunto planejado.")
-            else:
-                for item in itens:
-                    cor = "#28a745" if item["status"] == "estudado" else "#856404"
-                    icone_s = "✅" if item["status"] == "estudado" else "⬜"
-                    label_btn = "↩️ Desfazer" if item["status"] == "estudado" else "✅ Estudado"
-                    novo_status = "pendente" if item["status"] == "estudado" else "estudado"
+            # -- Itens do dia --
+            for item in itens:
+                tipo  = item.get("tipo", "assunto")
+                cor   = "#28a745" if item["status"] == "estudado" else _cor_tipo(tipo)
+                badge = _badge(tipo)
+                icone_s   = "✅" if item["status"] == "estudado" else "⬜"
+                label_btn = "↩️ Desfazer" if item["status"] == "estudado" else "✅ Feito"
+                novo_status = "pendente" if item["status"] == "estudado" else "estudado"
+                tipo_label = {"atividade": " [Atividade]", "revisao": " [Revisão]"}.get(tipo, "")
 
-                    with st.container(border=True):
-                        ca, cb, cc = st.columns([5, 2, 1])
-                        with ca:
-                            st.markdown(
-                                f"{icone_s}&nbsp;"
-                                f"<span style='color:{cor};font-weight:600'>{item['disciplina_nome']}</span>"
-                                f" — {item['assunto_nome']}",
-                                unsafe_allow_html=True
+                with st.container(border=True):
+                    ca, cb, cc, cd = st.columns([5, 2, 1, 1])
+                    with ca:
+                        disc_txt = f"<span style='color:{cor};font-weight:600'>{item['disciplina_nome']}</span> — " if item['disciplina_nome'] else ""
+                        st.markdown(
+                            f"{icone_s} {badge}"
+                            f"{disc_txt}"
+                            f"{item['assunto_nome']}"
+                            f"<span style='font-size:11px;color:#888'>{tipo_label}</span>",
+                            unsafe_allow_html=True
+                        )
+                        if item.get("descricao"):
+                            st.caption(item["descricao"])
+                        # ID copiável (para revisão manual)
+                        st.caption(f"🆔 `{item['id']}`")
+                        # Links
+                        for li, lnk in enumerate(item.get("links", [])):
+                            lc1, lc2 = st.columns([5, 1])
+                            with lc1:
+                                st.markdown(f"&nbsp;&nbsp;🔗 [{lnk['titulo']}]({lnk['url']})")
+                            with lc2:
+                                if st.button("❌", key=f"est_rl_{item['id']}_{li}"):
+                                    est_remover_link(item["id"], li)
+                                    st.rerun()
+                    with cb:
+                        if st.button(label_btn, key=f"est_mk_{item['id']}"):
+                            est_marcar_status(
+                                item["id"], novo_status,
+                                plano_id=plano_id,
+                                agendar_revisoes_auto=rev_auto,
+                                intervalos_revisao=intervalos_rev if rev_auto else []
                             )
-                            for li, lnk in enumerate(item.get("links", [])):
-                                lc1, lc2 = st.columns([5, 1])
-                                with lc1:
-                                    st.markdown(f"&nbsp;&nbsp;🔗 [{lnk['titulo']}]({lnk['url']})")
-                                with lc2:
-                                    if st.button("❌", key=f"est_rl_{item['id']}_{li}"):
-                                        est_remover_link(item["id"], li)
-                                        st.rerun()
-                        with cb:
-                            if st.button(label_btn, key=f"est_mk_{item['id']}"):
-                                est_marcar_status(item["id"], novo_status)
-                                st.rerun()
-                        with cc:
-                            if st.button("🗑️", key=f"est_rm_{item['id']}", help="Remover"):
-                                est_remover_planejamento(item["id"])
-                                st.rerun()
+                            st.rerun()
+                    with cc:
+                        # Botão realocar — abre "popup" via session_state
+                        if st.button("📅", key=f"est_realoc_btn_{item['id']}", help="Realocar para outro dia"):
+                            st.session_state["est_realocando_id"] = item["id"]
+                            st.rerun()
+                    with cd:
+                        if st.button("🗑️", key=f"est_rm_{item['id']}", help="Remover"):
+                            est_remover_planejamento(item["id"])
+                            if st.session_state.get("est_realocando_id") == item["id"]:
+                                st.session_state.pop("est_realocando_id", None)
+                            st.rerun()
 
-                        with st.expander("🔗 Adicionar link", expanded=False):
-                            with st.form(key=f"est_add_link_{item['id']}"):
-                                lt = st.text_input("Título", key=f"est_lt_{item['id']}")
-                                lu = st.text_input("URL", key=f"est_lu_{item['id']}")
-                                if st.form_submit_button("Adicionar"):
-                                    if lt and lu:
-                                        est_adicionar_link(item["id"], lt, lu)
-                                        st.rerun()
+                    # Painel de realocação inline (aparece quando este item está selecionado)
+                    if st.session_state.get("est_realocando_id") == item["id"]:
+                        with st.container():
+                            st.markdown("**📅 Realocar para:**")
+                            rc1, rc2, rc3 = st.columns([2, 1, 1])
+                            with rc1:
+                                nova_data = st.date_input(
+                                    "Novo dia", value=dia_date,
+                                    key=f"est_nova_data_{item['id']}"
+                                )
+                            with rc2:
+                                st.write("")
+                                st.write("")
+                                if st.button("✅ Confirmar", key=f"est_confirmar_realoc_{item['id']}", type="primary"):
+                                    est_realocar_assunto(item["id"], nova_data.strftime("%Y-%m-%d"))
+                                    st.session_state.pop("est_realocando_id", None)
+                                    st.rerun()
+                            with rc3:
+                                st.write("")
+                                st.write("")
+                                if st.button("✖ Cancelar", key=f"est_cancelar_realoc_{item['id']}"):
+                                    st.session_state.pop("est_realocando_id", None)
+                                    st.rerun()
+
+                    with st.expander("🔗 Adicionar link", expanded=False):
+                        with st.form(key=f"est_add_link_{item['id']}"):
+                            lt = st.text_input("Título", key=f"est_lt_{item['id']}")
+                            lu = st.text_input("URL",    key=f"est_lu_{item['id']}")
+                            if st.form_submit_button("Adicionar"):
+                                if lt and lu:
+                                    est_adicionar_link(item["id"], lt, lu)
+                                    st.rerun()
+
+            # -- Adicionar atividade manual no dia --
+            with st.expander(f"➕ Adicionar atividade manual — {dia_date.day:02d}/{dia_date.month:02d}"):
+                with st.form(key=f"est_ativ_{data_str}"):
+                    ativ_titulo = st.text_input("Título da atividade", key=f"est_ativ_titulo_{data_str}")
+                    ativ_desc   = st.text_area("Descrição (opcional)", height=60, key=f"est_ativ_desc_{data_str}")
+                    if st.form_submit_button("Adicionar atividade"):
+                        if ativ_titulo.strip():
+                            est_adicionar_atividade(plano_id, data_str, ativ_titulo, ativ_desc)
+                            st.rerun()
+                        else:
+                            st.warning("Informe um título.")
 
             st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
 
