@@ -2209,6 +2209,17 @@ def est_renomear_plano(plano_id, novo_nome):
     db = get_db()
     db.est_planos.update_one({"_id": ObjectId(plano_id)}, {"$set": {"nome": novo_nome.strip()}})
 
+def est_salvar_config_plano(plano_id, **kwargs):
+    """Salva configurações do plano (ex: rev_auto=True) no documento do plano."""
+    db = get_db()
+    db.est_planos.update_one({"_id": ObjectId(plano_id)}, {"$set": kwargs})
+
+def est_carregar_config_plano(plano_id):
+    """Retorna o documento do plano para leitura de configurações."""
+    db = get_db()
+    doc = db.est_planos.find_one({"_id": ObjectId(plano_id)})
+    return doc or {}
+
 # --- Disciplinas ---
 def est_listar_disciplinas(plano_id):
     db = get_db()
@@ -2617,12 +2628,23 @@ def _page_estudos_plano(plano_id):
 
     # Configurações de revisão (na sidebar do plano)
     INTERVALOS_REVISAO = [1, 7, 30]  # fixo: +1, +7, +30 dias
+
+    # Carrega preferência salva no banco na primeira vez que o plano é aberto
+    _cfg_key = f"est_rev_auto_loaded_{plano_id}"
+    if _cfg_key not in st.session_state:
+        _cfg = est_carregar_config_plano(plano_id)
+        st.session_state["est_rev_auto"] = _cfg.get("rev_auto", False)
+        st.session_state[_cfg_key] = True
+
     with st.sidebar:
         st.divider()
         st.markdown("**⚙️ Revisão automática**")
         rev_auto = st.checkbox("Agendar revisões ao marcar estudado",
                                value=st.session_state.get("est_rev_auto", False),
-                               key="est_rev_auto")
+                               key="est_rev_auto",
+                               on_change=lambda: est_salvar_config_plano(
+                                   plano_id, rev_auto=st.session_state.get("est_rev_auto", False)
+                               ))
         if rev_auto:
             st.caption("Ao marcar um assunto como estudado, revisões serão agendadas automaticamente em **+1, +7 e +30 dias**.")
     intervalos_rev = INTERVALOS_REVISAO if rev_auto else []
