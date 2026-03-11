@@ -2398,6 +2398,7 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
             "status": d.get("status", "pendente"),
             "links": d.get("links", []),
             "disciplina_id": str(d.get("disciplina_id", "")) if d.get("disciplina_id") else "",
+            "questionarios_vinculados": d.get("questionarios_vinculados", []),
         })
     return por_data
 
@@ -2459,6 +2460,39 @@ def est_remover_link(item_id, idx_link):
         if 0 <= idx_link < len(links):
             links.pop(idx_link)
             db.est_planejamento.update_one({"_id": ObjectId(item_id)}, {"$set": {"links": links}})
+
+def est_vincular_questionario(item_id, questionario_id, questionario_nome, disciplina_nome):
+    """Vincula um questionário existente a um item do planejamento."""
+    db = get_db()
+    doc = db.est_planejamento.find_one({"_id": ObjectId(item_id)})
+    if not doc:
+        return False
+    vinculados = doc.get("questionarios_vinculados", [])
+    # Evita duplicatas
+    if any(v["questionario_id"] == questionario_id for v in vinculados):
+        return False
+    vinculados.append({
+        "questionario_id": questionario_id,
+        "questionario_nome": questionario_nome,
+        "disciplina_nome": disciplina_nome,
+    })
+    db.est_planejamento.update_one(
+        {"_id": ObjectId(item_id)},
+        {"$set": {"questionarios_vinculados": vinculados}}
+    )
+    return True
+
+def est_desvincular_questionario(item_id, questionario_id):
+    """Remove vínculo de um questionário de um item do planejamento."""
+    db = get_db()
+    doc = db.est_planejamento.find_one({"_id": ObjectId(item_id)})
+    if not doc:
+        return
+    vinculados = [v for v in doc.get("questionarios_vinculados", []) if v["questionario_id"] != questionario_id]
+    db.est_planejamento.update_one(
+        {"_id": ObjectId(item_id)},
+        {"$set": {"questionarios_vinculados": vinculados}}
+    )
 
 # =============================
 # MÓDULO DE ESTUDOS — helpers
@@ -2862,7 +2896,75 @@ def _page_estudos_plano(plano_id):
                                     st.session_state.pop("est_realocando_id", None)
                                     st.rerun()
 
-                    with st.expander("🔗 Adicionar link", expanded=False):
+                    # Questionários vinculados
+                    qvs = item.get("questionarios_vinculados", [])
+                    if qvs:
+                        st.markdown("**📝 Questionários vinculados:**")
+                        for qv in qvs:
+                            qvc1, qvc2 = st.columns([6, 1])
+                            with qvc1:
+                                if st.button(
+                                    f"📝 {qv['questionario_nome']} · {qv['disciplina_nome']}",
+                                    key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
+                                    help="Abrir este questionário para praticar"
+                                ):
+                                    st.session_state["current_qid"] = qv["questionario_id"]
+                                    st.session_state["go_to"] = "Praticar"
+                                    st.rerun()
+                            with qvc2:
+                                if st.button("❌", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
+                                             help="Desvincular"):
+                                    est_desvincular_questionario(item["id"], qv["questionario_id"])
+                                    st.rerun()
+
+                    with st.expander("📝 Vincular questionário", expanded=False):
+                        todos_qs = get_questionarios()
+                        qs_uteis = [q for q in todos_qs if q["nome"] not in ("— Sistema —",)]
+                        if not qs_uteis:
+                            st.caption("Nenhum questionário disponível.")
+                        else:
+                            # Filtro rápido por disciplina
+                            discs_qs = sorted({(q.get("disciplina") or "Sem Disciplina") for q in qs_uteis
+                                               if q.get("disciplina") not in ("— Sistema —", None)})
+                            disc_filt = st.selectbox(
+                                "Filtrar por disciplina",
+                                ["Todas"] + discs_qs,
+                                key=f"est_qfilt_disc_{item['id']}"
+                            )
+                            qs_filtrados = qs_uteis if disc_filt == "Todas" else [
+                                q for q in qs_uteis if (q.get("disciplina") or "Sem Disciplina") == disc_filt
+                            ]
+                            busca_q = st.text_input(
+                                "Buscar questionário", key=f"est_qbusca_{item['id']}",
+                                placeholder="Digite parte do nome..."
+                            )
+                            if busca_q:
+                                qs_filtrados = [q for q in qs_filtrados if busca_q.lower() in q["nome"].lower()]
+                            if qs_filtrados:
+                                q_opcoes = {q["id"]: f"{q['nome']} · {q.get('disciplina','')}" for q in qs_filtrados}
+                                q_sel_id = st.selectbox(
+                                    "Questionário",
+                                    list(q_opcoes.keys()),
+                                    format_func=lambda x: q_opcoes[x],
+                                    key=f"est_qsel_{item['id']}"
+                                )
+                                q_sel = next((q for q in qs_filtrados if q["id"] == q_sel_id), None)
+                                if st.button("Vincular", key=f"est_qvincular_{item['id']}", type="primary"):
+                                    if q_sel:
+                                        ok = est_vincular_questionario(
+                                            item["id"], q_sel["id"],
+                                            q_sel["nome"],
+                                            q_sel.get("disciplina", "")
+                                        )
+                                        if ok:
+                                            st.success("Questionário vinculado!")
+                                            st.rerun()
+                                        else:
+                                            st.info("Já vinculado.")
+                            else:
+                                st.caption("Nenhum questionário encontrado.")
+
+                    with st.expander("🔗 Adicionar link externo", expanded=False):
                         with st.form(key=f"est_add_link_{item['id']}"):
                             lt = st.text_input("Título", key=f"est_lt_{item['id']}")
                             lu = st.text_input("URL",    key=f"est_lu_{item['id']}")
