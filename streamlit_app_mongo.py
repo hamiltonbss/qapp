@@ -2832,20 +2832,22 @@ def _page_estudos_plano(plano_id):
                 label_btn   = "↩️ Desfazer" if feito else "✅ Feito"
 
                 with st.container(border=True):
-                    ca, cb, cc, cd = st.columns([5, 2, 1, 1])
-                    with ca:
-                        disc_txt = (
-                            f"<span style='color:{cor_item};font-weight:600'>"
-                            f"{item['disciplina_nome']}</span> — "
-                        ) if item["disciplina_nome"] else ""
-                        st.markdown(
-                            f"{icone_s} {badge_tipo}{disc_txt}"
-                            f"{item['assunto_nome']}"
-                            f"<span style='font-size:11px;color:#888'>{tipo_label}</span>",
-                            unsafe_allow_html=True
-                        )
-                        if item.get("descricao"):
-                            st.caption(item["descricao"])
+                    # Título — largura total
+                    disc_txt = (
+                        f"<span style='color:{cor_item};font-weight:600'>"
+                        f"{item['disciplina_nome']}</span> — "
+                    ) if item["disciplina_nome"] else ""
+                    st.markdown(
+                        f"{icone_s} {badge_tipo}{disc_txt}"
+                        f"{item['assunto_nome']}"
+                        f"<span style='font-size:11px;color:#888'>{tipo_label}</span>",
+                        unsafe_allow_html=True
+                    )
+                    if item.get("descricao"):
+                        st.caption(item["descricao"])
+
+                    # Botões — linha separada com proporções generosas
+                    cb, cc, cd = st.columns(3)
                     with cb:
                         if st.button(label_btn, key=f"est_mk_{item['id']}",
                                      use_container_width=True):
@@ -2857,14 +2859,16 @@ def _page_estudos_plano(plano_id):
                             )
                             st.rerun()
                     with cc:
-                        if st.button("Mover", key=f"est_realoc_btn_{item['id']}"):
+                        if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
+                                     use_container_width=True):
                             if st.session_state.get("est_realocando_id") == item["id"]:
                                 st.session_state.pop("est_realocando_id", None)
                             else:
                                 st.session_state["est_realocando_id"] = item["id"]
                             st.rerun()
                     with cd:
-                        if st.button("Excluir", key=f"est_rm_{item['id']}"):
+                        if st.button("Excluir", key=f"est_rm_{item['id']}",
+                                     use_container_width=True):
                             est_remover_planejamento(item["id"])
                             st.session_state.pop("est_realocando_id", None)
                             st.rerun()
@@ -2895,7 +2899,7 @@ def _page_estudos_plano(plano_id):
                     lnks = item.get("links", [])
                     if lnks:
                         for li, lnk in enumerate(lnks):
-                            lc1, lc2 = st.columns([6, 1])
+                            lc1, lc2 = st.columns([5, 1])
                             with lc1:
                                 st.markdown(
                                     f"<span style='font-size:12px'>🔗 <a href='{lnk['url']}' "
@@ -2912,7 +2916,7 @@ def _page_estudos_plano(plano_id):
                     if qvs:
                         st.caption("📝 Questionários vinculados:")
                         for qv in qvs:
-                            qvc1, qvc2 = st.columns([6, 1])
+                            qvc1, qvc2 = st.columns([5, 1])
                             with qvc1:
                                 if st.button(
                                     f"▶ Praticar: {qv['questionario_nome']}",
