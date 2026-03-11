@@ -2832,7 +2832,7 @@ def _page_estudos_plano(plano_id):
                 label_btn   = "↩️ Desfazer" if feito else "✅ Feito"
 
                 with st.container(border=True):
-                    ca, cb, cc, cd = st.columns([6, 2, 1, 1])
+                    ca, cb, cc, cd = st.columns([5, 2, 1, 1])
                     with ca:
                         disc_txt = (
                             f"<span style='color:{cor_item};font-weight:600'>"
@@ -2857,16 +2857,14 @@ def _page_estudos_plano(plano_id):
                             )
                             st.rerun()
                     with cc:
-                        if st.button("📅", key=f"est_realoc_btn_{item['id']}",
-                                     help="Mover para outro dia"):
+                        if st.button("Mover", key=f"est_realoc_btn_{item['id']}"):
                             if st.session_state.get("est_realocando_id") == item["id"]:
                                 st.session_state.pop("est_realocando_id", None)
                             else:
                                 st.session_state["est_realocando_id"] = item["id"]
                             st.rerun()
                     with cd:
-                        if st.button("🗑️", key=f"est_rm_{item['id']}",
-                                     help="Excluir item"):
+                        if st.button("Excluir", key=f"est_rm_{item['id']}"):
                             est_remover_planejamento(item["id"])
                             st.session_state.pop("est_realocando_id", None)
                             st.rerun()
@@ -2897,7 +2895,7 @@ def _page_estudos_plano(plano_id):
                     lnks = item.get("links", [])
                     if lnks:
                         for li, lnk in enumerate(lnks):
-                            lc1, lc2 = st.columns([8, 1])
+                            lc1, lc2 = st.columns([6, 1])
                             with lc1:
                                 st.markdown(
                                     f"<span style='font-size:12px'>🔗 <a href='{lnk['url']}' "
@@ -2905,8 +2903,7 @@ def _page_estudos_plano(plano_id):
                                     unsafe_allow_html=True
                                 )
                             with lc2:
-                                if st.button("🗑️", key=f"est_rl_{item['id']}_{li}",
-                                             help="Remover link"):
+                                if st.button("Remover", key=f"est_rl_{item['id']}_{li}"):
                                     est_remover_link(item["id"], li)
                                     st.rerun()
 
@@ -2915,7 +2912,7 @@ def _page_estudos_plano(plano_id):
                     if qvs:
                         st.caption("📝 Questionários vinculados:")
                         for qv in qvs:
-                            qvc1, qvc2 = st.columns([8, 1])
+                            qvc1, qvc2 = st.columns([6, 1])
                             with qvc1:
                                 if st.button(
                                     f"▶ Praticar: {qv['questionario_nome']}",
@@ -2926,8 +2923,7 @@ def _page_estudos_plano(plano_id):
                                     st.session_state["go_to"] = "Praticar"
                                     st.rerun()
                             with qvc2:
-                                if st.button("🗑️", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
-                                             help="Desvincular"):
+                                if st.button("Remover", key=f"est_desvq_{item['id']}_{qv['questionario_id']}"):
                                     est_desvincular_questionario(item["id"], qv["questionario_id"])
                                     st.rerun()
 
