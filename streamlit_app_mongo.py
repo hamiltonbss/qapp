@@ -2830,57 +2830,49 @@ def _page_estudos_plano(plano_id):
                 label_feito = "Desfazer" if feito else "Marcar feito"
 
                 with st.container(border=True):
-                    # -- Linha de título --
-                    ca, cb = st.columns([7, 3])
-                    with ca:
-                        disc_part = (
-                            f"<span style='color:{cor_item};font-weight:600;font-size:13px'>"
-                            f"{item['disciplina_nome']}</span>"
-                            f"<span style='color:#555;font-size:13px'> — </span>"
-                        ) if item["disciplina_nome"] else ""
-                        badge_part = (
-                            f"<span style='font-size:10px;background:{cor_tipo};color:#fff;"
-                            f"border-radius:4px;padding:1px 5px;margin-right:4px'>{tipo_badge}</span>"
-                        ) if tipo_badge else ""
-                        feito_part = (
-                            "<span style='font-size:10px;background:#28a745;color:#fff;"
-                            "border-radius:4px;padding:1px 5px;margin-right:4px'>Feito</span>"
-                        ) if feito else ""
-                        st.markdown(
-                            f"{feito_part}{badge_part}{disc_part}"
-                            f"<span style='font-size:13px'>{item['assunto_nome']}</span>",
-                            unsafe_allow_html=True
-                        )
-                        if item.get("descricao"):
-                            st.caption(item["descricao"])
-                    with cb:
-                        # Botões de ação na mesma linha
-                        ba, bb, bc = st.columns(3)
-                        with ba:
-                            if st.button(label_feito, key=f"est_mk_{item['id']}",
-                                         use_container_width=True):
-                                est_marcar_status(
-                                    item["id"], novo_status,
-                                    plano_id=plano_id,
-                                    agendar_revisoes_auto=rev_auto,
-                                    intervalos_revisao=intervalos_rev if rev_auto else []
-                                )
-                                st.rerun()
-                        with bb:
-                            if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
-                                         use_container_width=True):
-                                # toggle: se já aberto, fecha
-                                if st.session_state.get("est_realocando_id") == item["id"]:
-                                    st.session_state.pop("est_realocando_id", None)
-                                else:
-                                    st.session_state["est_realocando_id"] = item["id"]
-                                st.rerun()
-                        with bc:
-                            if st.button("Excluir", key=f"est_rm_{item['id']}",
-                                         use_container_width=True):
-                                est_remover_planejamento(item["id"])
+                    # -- Título (largura total) --
+                    disc_part = (
+                        f"<span style='color:{cor_item};font-weight:600'>"
+                        f"{item['disciplina_nome']}</span> — "
+                    ) if item["disciplina_nome"] else ""
+                    badge_html = (
+                        f"<span style='font-size:10px;background:{cor_tipo};color:#fff;"
+                        f"border-radius:3px;padding:1px 6px;margin-right:6px'>{tipo_badge}</span>"
+                    ) if tipo_badge else ""
+                    feito_html = (
+                        "<span style='font-size:10px;background:#28a745;color:#fff;"
+                        "border-radius:3px;padding:1px 6px;margin-right:6px'>✓ Feito</span>"
+                    ) if feito else ""
+                    st.markdown(
+                        f"{feito_html}{badge_html}{disc_part}{item['assunto_nome']}",
+                        unsafe_allow_html=True
+                    )
+                    if item.get("descricao"):
+                        st.caption(item["descricao"])
+
+                    # -- Botões de ação (linha fina abaixo do título) --
+                    ba, bb, bc, _esp = st.columns([2, 1, 1, 4])
+                    with ba:
+                        if st.button(label_feito, key=f"est_mk_{item['id']}"):
+                            est_marcar_status(
+                                item["id"], novo_status,
+                                plano_id=plano_id,
+                                agendar_revisoes_auto=rev_auto,
+                                intervalos_revisao=intervalos_rev if rev_auto else []
+                            )
+                            st.rerun()
+                    with bb:
+                        if st.button("Mover", key=f"est_realoc_btn_{item['id']}"):
+                            if st.session_state.get("est_realocando_id") == item["id"]:
                                 st.session_state.pop("est_realocando_id", None)
-                                st.rerun()
+                            else:
+                                st.session_state["est_realocando_id"] = item["id"]
+                            st.rerun()
+                    with bc:
+                        if st.button("Excluir", key=f"est_rm_{item['id']}"):
+                            est_remover_planejamento(item["id"])
+                            st.session_state.pop("est_realocando_id", None)
+                            st.rerun()
 
                     # -- Painel mover --
                     if st.session_state.get("est_realocando_id") == item["id"]:
@@ -2908,15 +2900,15 @@ def _page_estudos_plano(plano_id):
                     lnks = item.get("links", [])
                     if lnks:
                         for li, lnk in enumerate(lnks):
-                            lc1, lc2 = st.columns([7, 2])
+                            lc1, lc2 = st.columns([8, 1])
                             with lc1:
                                 st.markdown(
                                     f"<span style='font-size:12px'>🔗 <a href='{lnk['url']}' target='_blank'>{lnk['titulo']}</a></span>",
                                     unsafe_allow_html=True
                                 )
                             with lc2:
-                                if st.button("Remover link", key=f"est_rl_{item['id']}_{li}",
-                                             use_container_width=True):
+                                if st.button("✕", key=f"est_rl_{item['id']}_{li}",
+                                             help="Remover link"):
                                     est_remover_link(item["id"], li)
                                     st.rerun()
 
@@ -2925,10 +2917,10 @@ def _page_estudos_plano(plano_id):
                     if qvs:
                         st.caption("Questionários vinculados:")
                         for qv in qvs:
-                            qvc1, qvc2 = st.columns([7, 2])
+                            qvc1, qvc2 = st.columns([8, 1])
                             with qvc1:
                                 if st.button(
-                                    f"Praticar: {qv['questionario_nome']}",
+                                    f"▶  Praticar: {qv['questionario_nome']}",
                                     key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
                                     use_container_width=True
                                 ):
@@ -2936,8 +2928,8 @@ def _page_estudos_plano(plano_id):
                                     st.session_state["go_to"] = "Praticar"
                                     st.rerun()
                             with qvc2:
-                                if st.button("Desvincular", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
-                                             use_container_width=True):
+                                if st.button("✕", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
+                                             help="Desvincular questionário"):
                                     est_desvincular_questionario(item["id"], qv["questionario_id"])
                                     st.rerun()
 
