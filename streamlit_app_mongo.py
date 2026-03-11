@@ -2243,17 +2243,23 @@ def est_listar_assuntos(disc_id):
 
 def est_importar_assuntos(disc_id, texto_colado):
     db = get_db()
+    oid = ObjectId(disc_id)
     linhas = [l.strip() for l in texto_colado.splitlines() if l.strip()]
     inseridos = 0
-    base_ordem = db.est_assuntos.count_documents({"disciplina_id": ObjectId(disc_id)})
-    for i, linha in enumerate(linhas):
-        if not db.est_assuntos.find_one({"disciplina_id": ObjectId(disc_id), "nome": linha}):
+    # Próximo índice de ordem pelo maior valor existente
+    ultimo = db.est_assuntos.find_one({"disciplina_id": oid}, sort=[("ordem", DESCENDING)])
+    proximo_ordem = (ultimo["ordem"] + 1) if ultimo and "ordem" in ultimo else 0
+    nomes_existentes = {d["nome"] for d in db.est_assuntos.find({"disciplina_id": oid}, {"nome": 1})}
+    for linha in linhas:
+        if linha not in nomes_existentes:
             db.est_assuntos.insert_one({
-                "disciplina_id": ObjectId(disc_id),
+                "disciplina_id": oid,
                 "nome": linha,
-                "ordem": base_ordem + i,
+                "ordem": proximo_ordem,
                 "data_criacao": datetime.now(timezone.utc).isoformat(),
             })
+            proximo_ordem += 1
+            nomes_existentes.add(linha)
             inseridos += 1
     return inseridos
 
@@ -2576,6 +2582,7 @@ def _page_estudos_plano(plano_id):
         st.title(f"📋 {plano_nome}")
 
     # Configurações de revisão (na sidebar do plano)
+    INTERVALOS_REVISAO = [1, 7, 30]  # fixo: +1, +7, +30 dias
     with st.sidebar:
         st.divider()
         st.markdown("**⚙️ Revisão automática**")
@@ -2583,13 +2590,8 @@ def _page_estudos_plano(plano_id):
                                value=st.session_state.get("est_rev_auto", False),
                                key="est_rev_auto")
         if rev_auto:
-            st.caption("Intervalos (dias após o estudo):")
-            rev_d1 = st.number_input("1ª revisão", min_value=1, max_value=90, value=1, step=1, key="est_rev_d1")
-            rev_d2 = st.number_input("2ª revisão", min_value=1, max_value=180, value=7, step=1, key="est_rev_d2")
-            rev_d3 = st.number_input("3ª revisão", min_value=1, max_value=365, value=30, step=1, key="est_rev_d3")
-            intervalos_rev = sorted({int(rev_d1), int(rev_d2), int(rev_d3)})
-        else:
-            intervalos_rev = []
+            st.caption("Ao marcar um assunto como estudado, revisões serão agendadas automaticamente em **+1, +7 e +30 dias**.")
+    intervalos_rev = INTERVALOS_REVISAO if rev_auto else []
 
     # Navegação semanal
     if "est_semana_ref" not in st.session_state:
@@ -2743,28 +2745,7 @@ def _page_estudos_plano(plano_id):
         else:
             st.info("Nenhuma disciplina ainda.")
 
-        # ---- Revisão manual ----
-        st.divider()
-        st.subheader("🔁 Revisão manual")
-        st.caption("Agenda revisões para um assunto já alocado.")
-        rev_item_id = st.text_input("ID do item (copie do ícone 🆔)", key="est_rev_item_id",
-                                    placeholder="Cole o ID aqui")
-        rev_intervalos_txt = st.text_input("Intervalos (dias, separados por vírgula)",
-                                           value="1, 7, 30", key="est_rev_intervalos")
-        if st.button("Agendar revisões", key="est_btn_rev_manual"):
-            if rev_item_id.strip():
-                try:
-                    ivs = [int(x.strip()) for x in rev_intervalos_txt.split(",") if x.strip().isdigit()]
-                    if ivs:
-                        n_rev = est_agendar_revisoes(plano_id, rev_item_id.strip(), ivs)
-                        st.success(f"{n_rev} revisão(ões) agendada(s).")
-                        st.rerun()
-                    else:
-                        st.warning("Informe ao menos um intervalo válido.")
-                except Exception as e:
-                    st.error(f"Erro: {e}")
-            else:
-                st.warning("Informe o ID do item.")
+
 
     # ========== AGENDA SEMANAL ==========
     with col_agenda:
@@ -2827,8 +2808,6 @@ def _page_estudos_plano(plano_id):
                         )
                         if item.get("descricao"):
                             st.caption(item["descricao"])
-                        # ID copiável (para revisão manual)
-                        st.caption(f"🆔 `{item['id']}`")
                         # Links
                         for li, lnk in enumerate(item.get("links", [])):
                             lc1, lc2 = st.columns([5, 1])
