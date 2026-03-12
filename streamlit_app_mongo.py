@@ -2293,7 +2293,12 @@ def est_alocar_assunto(plano_id, data_str, assunto_id, disciplina_id, disciplina
     })
     if existe:
         return False
-    db.est_planejamento.insert_one({
+    # Busca a ordem do assunto para garantir ordenação correta na agenda
+    _db = db
+    _assunto_doc = _db.est_assuntos.find_one({"_id": ObjectId(assunto_id)}, {"ordem": 1})
+    _ordem = _assunto_doc.get("ordem", 9999) if _assunto_doc else 9999
+
+    _db.est_planejamento.insert_one({
         "plano_id": ObjectId(plano_id),
         "data": data_str,
         "assunto_id": ObjectId(assunto_id),
@@ -2303,6 +2308,7 @@ def est_alocar_assunto(plano_id, data_str, assunto_id, disciplina_id, disciplina
         "tipo": "assunto",          # assunto | atividade | revisao
         "status": "pendente",
         "links": [],
+        "ordem_assunto": _ordem,
         "data_criacao": datetime.now(timezone.utc).isoformat(),
     })
     return True
@@ -2392,10 +2398,10 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
     db = get_db()
     d_ini = data_inicio.strftime("%Y-%m-%d")
     d_fim = data_fim.strftime("%Y-%m-%d")
-    docs = list(db.est_planejamento.find({
-        "plano_id": ObjectId(plano_id),
-        "data": {"$gte": d_ini, "$lte": d_fim}
-    }))
+    docs = list(db.est_planejamento.find(
+        {"plano_id": ObjectId(plano_id), "data": {"$gte": d_ini, "$lte": d_fim}},
+        sort=[("ordem_assunto", ASCENDING), ("data_criacao", ASCENDING)]
+    ))
     por_data = {}
     for d in docs:
         key = d["data"]
@@ -2413,13 +2419,43 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
         })
     return por_data
 
-def est_distribuir_disciplina(plano_id, disc_id, disc_nome, data_inicio, data_fim,
-                               dias_semana_ativos=None, intervalo=1):
+def est_calcular_distribuicao(n_assuntos, data_inicio, dias_semana_ativos,
+                              intervalo=1, assuntos_por_dia=1):
     """
-    Distribui assuntos preservando ordem de importação.
-    intervalo=1 → consecutivo | 2 → um dia sim, um não | N → pula N-1 dias entre alocações.
+    Retorna a lista de (data, [indices_assuntos]) que seriam gerados,
+    sem gravar nada. Útil para preview.
+    intervalo: pula N-1 dias entre dias de alocação.
+    assuntos_por_dia: quantos assuntos por dia de alocação.
     """
     from datetime import timedelta
+    intervalo = max(1, int(intervalo))
+    apd = max(1, int(assuntos_por_dia))
+
+    agenda = []   # lista de datas de alocação, repetindo cada uma apd vezes
+    d = data_inicio
+    idx = 0
+    pulos = 0
+    while idx < n_assuntos:
+        if d.weekday() in dias_semana_ativos:
+            if pulos == 0:
+                for _ in range(apd):
+                    agenda.append(d)
+                    idx += 1
+                    if idx >= n_assuntos:
+                        break
+                pulos = intervalo - 1
+            else:
+                pulos -= 1
+        d += timedelta(days=1)
+    return agenda   # agenda[i] = data do assunto i
+
+def est_distribuir_disciplina(plano_id, disc_id, disc_nome, data_inicio,
+                               dias_semana_ativos=None, intervalo=1, assuntos_por_dia=1):
+    """
+    Distribui assuntos preservando ordem, calculando data_fim automaticamente.
+    intervalo=1 → dia sim dia sim | 2 → aloca, pula 1 | N → aloca, pula N-1
+    assuntos_por_dia: quantos assuntos alocar em cada dia de alocação.
+    """
     assuntos = est_listar_assuntos(disc_id)   # já ordenado por 'ordem'
     if not assuntos:
         return 0, 0
@@ -2427,22 +2463,13 @@ def est_distribuir_disciplina(plano_id, disc_id, disc_nome, data_inicio, data_fi
     if dias_semana_ativos is None:
         dias_semana_ativos = list(range(7))
 
-    dias_base = []
-    d = data_inicio
-    while d <= data_fim:
-        if d.weekday() in dias_semana_ativos:
-            dias_base.append(d)
-        d += timedelta(days=1)
-
-    if not dias_base:
-        return 0, 0
-
-    intervalo = max(1, int(intervalo))
-    dias_disponiveis = dias_base[::intervalo]
+    agenda = est_calcular_distribuicao(
+        len(assuntos), data_inicio, dias_semana_ativos, intervalo, assuntos_por_dia
+    )
 
     alocados, ja_existiam = 0, 0
     for i, assunto in enumerate(assuntos):
-        dia_alvo = dias_disponiveis[i % len(dias_disponiveis)]
+        dia_alvo = agenda[i]
         data_str = dia_alvo.strftime("%Y-%m-%d")
         ok = est_alocar_assunto(
             plano_id, data_str,
@@ -2719,31 +2746,51 @@ def _page_estudos_plano(plano_id):
                         st.rerun()
 
             with st.expander("🗓️ Distribuir todos os assuntos"):
-                st.caption("Distribui na ordem de importação, com intervalo configurável.")
-                d_ini = st.date_input("Data início", value=segunda, key="est_dist_ini")
-                d_fim = st.date_input("Data fim", value=segunda + timedelta(days=29), key="est_dist_fim")
-                intervalo_val = st.number_input(
-                    "Intervalo entre alocações (dias)",
-                    min_value=1, max_value=30, value=1, step=1, key="est_dist_intervalo",
-                    help="1=consecutivo | 2=um dia sim, um não | 3=aloca, pula 2, aloca…"
-                )
-                dias_labels = ["Seg","Ter","Qua","Qui","Sex","Sáb","Dom"]
-                dias_sel = st.multiselect(
-                    "Dias da semana permitidos",
-                    options=list(range(7)), default=list(range(5)),
-                    format_func=lambda x: dias_labels[x], key="est_dist_dias"
-                )
-                assuntos_preview = est_listar_assuntos(disc_sel_id)
-                st.caption(f"{len(assuntos_preview)} assunto(s) serão distribuídos na ordem de importação.")
-                if st.button("Distribuir", key="est_btn_distribuir", type="primary"):
-                    if not dias_sel:
-                        st.warning("Selecione ao menos um dia.")
-                    elif d_fim < d_ini:
-                        st.warning("Data fim deve ser maior que data início.")
+                assuntos_dist = est_listar_assuntos(disc_sel_id)
+                n_assuntos = len(assuntos_dist)
+
+                if n_assuntos == 0:
+                    st.caption("Nenhum assunto cadastrado.")
+                else:
+                    d_ini = st.date_input("Data início", value=segunda, key="est_dist_ini", format="DD/MM/YYYY")
+                    apd_val = st.number_input(
+                        "Assuntos por dia",
+                        min_value=1, max_value=20, value=1, step=1, key="est_dist_apd",
+                        help="Quantos assuntos serão alocados em cada dia de estudo."
+                    )
+                    intervalo_val = st.number_input(
+                        "Intervalo entre dias de estudo",
+                        min_value=1, max_value=30, value=1, step=1, key="est_dist_intervalo",
+                        help="1=todos os dias | 2=dia sim, dia não | 3=aloca, pula 2…"
+                    )
+                    dias_labels = ["Seg","Ter","Qua","Qui","Sex","Sáb","Dom"]
+                    dias_sel = st.multiselect(
+                        "Dias da semana",
+                        options=list(range(7)), default=list(range(5)),
+                        format_func=lambda x: dias_labels[x], key="est_dist_dias"
+                    )
+
+                    # Preview automático
+                    if dias_sel:
+                        agenda_prev = est_calcular_distribuicao(
+                            n_assuntos, d_ini, dias_sel, intervalo_val, apd_val
+                        )
+                        if agenda_prev:
+                            data_fim_calc = agenda_prev[-1]
+                            n_dias_unicos = len({d.strftime("%Y-%m-%d") for d in agenda_prev})
+                            st.info(
+                                f"**{n_assuntos} assunto(s)** · "
+                                f"**{n_dias_unicos} dia(s) de estudo** · "
+                                f"Termina em **{data_fim_calc.strftime('%d/%m/%Y')}**"
+                            )
                     else:
+                        st.warning("Selecione ao menos um dia da semana.")
+
+                    if st.button("Distribuir", key="est_btn_distribuir", type="primary",
+                                 disabled=not dias_sel):
                         alocados, ja_ex = est_distribuir_disciplina(
                             plano_id, disc_sel_id, disc_sel_nome,
-                            d_ini, d_fim, dias_sel, intervalo_val
+                            d_ini, dias_sel, intervalo_val, apd_val
                         )
                         if alocados:
                             st.success(f"✅ {alocados} assunto(s) distribuído(s).")
@@ -2781,7 +2828,7 @@ def _page_estudos_plano(plano_id):
                             st.rerun()
 
                 st.markdown("**Alocar assunto no dia:**")
-                dia_sel = st.date_input("", value=hoje, key="est_dia_sel", label_visibility="collapsed")
+                dia_sel = st.date_input("", value=hoje, key="est_dia_sel", label_visibility="collapsed", format="DD/MM/YYYY")
                 if st.button("📌 Alocar", key="est_btn_alocar", use_container_width=True):
                     ok = est_alocar_assunto(
                         plano_id, dia_sel.strftime("%Y-%m-%d"),
@@ -2992,7 +3039,7 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                     with rc1:
                         nova_data = st.date_input(
                             "Mover para", value=dia_date,
-                            key=f"est_nova_data_{item['id']}"
+                            key=f"est_nova_data_{item['id']}", format="DD/MM/YYYY"
                         )
                     with rc2:
                         st.write("")
