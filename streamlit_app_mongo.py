@@ -2209,6 +2209,94 @@ def est_renomear_plano(plano_id, novo_nome):
     db = get_db()
     db.est_planos.update_one({"_id": ObjectId(plano_id)}, {"$set": {"nome": novo_nome.strip()}})
 
+def est_progresso_plano(plano_id):
+    """
+    Retorna dados consolidados de progresso para um plano:
+    - por disciplina: total de assuntos, estudados, pendentes
+    - lista de itens estudados com data_atualizacao (para ordenar por "mais antigo estudado")
+    - revisões agendadas futuras
+    - histórico de revisões já feitas
+    """
+    db = get_db()
+    oid = ObjectId(plano_id)
+    hoje_str = date.today().strftime("%Y-%m-%d")
+
+    docs = list(db.est_planejamento.find({"plano_id": oid}))
+
+    # Agrupa por disciplina
+    disc_map = {}   # disciplina_nome → {total, estudados, assuntos:[]}
+    revisoes_feitas   = []
+    revisoes_futuras  = []
+    assuntos_estudados = []   # para ordenar por data da última vez
+
+    for d in docs:
+        tipo   = d.get("tipo", "assunto")
+        status = d.get("status", "pendente")
+        disc   = d.get("disciplina_nome") or "(Atividades)"
+        nome   = d.get("assunto_nome", "")
+        data   = d.get("data", "")
+        atualizado = d.get("data_atualizacao") or d.get("data_criacao") or ""
+
+        if tipo == "revisao":
+            if status == "estudado":
+                revisoes_feitas.append({
+                    "assunto_nome": nome,
+                    "disciplina_nome": disc,
+                    "data": data,
+                    "data_atualizacao": atualizado,
+                })
+            elif data >= hoje_str:
+                revisoes_futuras.append({
+                    "assunto_nome": nome,
+                    "disciplina_nome": disc,
+                    "data": data,
+                })
+            continue  # revisões não entram no progresso de assuntos
+
+        if tipo == "atividade":
+            continue  # atividades manuais não entram no progresso
+
+        # tipo == "assunto"
+        if disc not in disc_map:
+            disc_map[disc] = {"total": 0, "estudados": 0, "assuntos": []}
+        disc_map[disc]["total"] += 1
+        if status == "estudado":
+            disc_map[disc]["estudados"] += 1
+            assuntos_estudados.append({
+                "assunto_nome": nome,
+                "disciplina_nome": disc,
+                "data": data,
+                "data_atualizacao": atualizado,
+            })
+        disc_map[disc]["assuntos"].append({
+            "nome": nome,
+            "status": status,
+            "data": data,
+            "data_atualizacao": atualizado,
+            "ordem_assunto": d.get("ordem_assunto", 9999),
+        })
+
+    # Ordena assuntos dentro de cada disciplina por ordem
+    for disc in disc_map:
+        disc_map[disc]["assuntos"].sort(key=lambda x: x["ordem_assunto"])
+
+    # Assuntos estudados ordenados por data_atualizacao ascendente (mais antigos primeiro)
+    assuntos_estudados.sort(key=lambda x: x["data_atualizacao"])
+
+    # Revisões futuras ordenadas por data
+    revisoes_futuras.sort(key=lambda x: x["data"])
+
+    # Revisões feitas ordenadas por data desc
+    revisoes_feitas.sort(key=lambda x: x["data"], reverse=True)
+
+    return {
+        "disciplinas": disc_map,
+        "assuntos_estudados": assuntos_estudados,
+        "revisoes_futuras": revisoes_futuras,
+        "revisoes_feitas": revisoes_feitas,
+    }
+
+
 def est_salvar_config_plano(plano_id, **kwargs):
     """Salva configurações do plano (ex: rev_auto=True) no documento do plano."""
     db = get_db()
@@ -2422,30 +2510,31 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
 def est_calcular_distribuicao(n_assuntos, data_inicio, dias_semana_ativos,
                               intervalo=1, assuntos_por_dia=1):
     """
-    Retorna a lista de (data, [indices_assuntos]) que seriam gerados,
-    sem gravar nada. Útil para preview.
-    intervalo: pula N-1 dias entre dias de alocação.
-    assuntos_por_dia: quantos assuntos por dia de alocação.
+    Retorna lista onde agenda[i] = date do assunto i.
+    intervalo=1: estuda em todos os dias ativos consecutivos.
+    intervalo=2: estuda 1 dia ativo, pula 1 dia ativo, estuda...
+    assuntos_por_dia: quantos assuntos por dia de estudo.
+    O intervalo conta apenas dias ativos, não dias corridos.
     """
     from datetime import timedelta
     intervalo = max(1, int(intervalo))
     apd = max(1, int(assuntos_por_dia))
 
-    agenda = []   # lista de datas de alocação, repetindo cada uma apd vezes
+    agenda = []
     d = data_inicio
     idx = 0
-    pulos = 0
+    dias_ativos_vistos = 0  # conta dias ativos desde o início
+
     while idx < n_assuntos:
         if d.weekday() in dias_semana_ativos:
-            if pulos == 0:
+            if dias_ativos_vistos % intervalo == 0:
+                # dia de estudo: alocar até apd assuntos
                 for _ in range(apd):
                     agenda.append(d)
                     idx += 1
                     if idx >= n_assuntos:
                         break
-                pulos = intervalo - 1
-            else:
-                pulos -= 1
+            dias_ativos_vistos += 1
         d += timedelta(days=1)
     return agenda   # agenda[i] = data do assunto i
 
@@ -2550,6 +2639,205 @@ def _cor_tipo(tipo):
 # =============================
 # MÓDULO DE ESTUDOS — tela inicial (lista de planos)
 # =============================
+def _page_progresso_plano(plano_id, plano_nome):
+    """Página de progresso e guia de revisões do plano."""
+    if st.button("← Voltar ao plano", key="prog_voltar"):
+        st.session_state.pop("est_prog_aberto", None)
+        st.rerun()
+
+    st.markdown(f"## 📊 Progresso — {plano_nome}")
+
+    dados = est_progresso_plano(plano_id)
+    disc_map   = dados["disciplinas"]
+    estudados  = dados["assuntos_estudados"]
+    rev_futuras = dados["revisoes_futuras"]
+    rev_feitas  = dados["revisoes_feitas"]
+
+    if not disc_map:
+        st.info("Nenhum assunto alocado ainda neste plano.")
+        return
+
+    # ── Resumo geral ──────────────────────────────────────────────────────────
+    total_geral    = sum(v["total"]     for v in disc_map.values())
+    estudados_geral = sum(v["estudados"] for v in disc_map.values())
+    pct_geral      = int(estudados_geral / total_geral * 100) if total_geral else 0
+
+    st.markdown("""
+<style>
+.prog-bar-wrap { background:#e9ecef; border-radius:8px; height:14px; margin:4px 0 12px 0; }
+.prog-bar-fill { height:14px; border-radius:8px;
+                 background:linear-gradient(90deg,#19747E,#2aab78); }
+.prog-disc-card { background:#fff; border-radius:10px; padding:14px 18px 10px 18px;
+                  margin-bottom:8px; box-shadow:0 1px 4px rgba(0,0,0,0.07);
+                  border-left:4px solid #19747E; }
+.prog-disc-title { font-size:14px; font-weight:700; color:#19747E; margin-bottom:2px; }
+.prog-pct { font-size:12px; color:#555; }
+.prog-assunto-row { font-size:13px; padding:3px 0; border-bottom:1px solid #f0f0f0; }
+.prog-feito  { color:#28a745; }
+.prog-pend   { color:#aaa; }
+.rev-card { background:#fff; border-radius:8px; padding:10px 14px;
+             margin-bottom:6px; border-left:3px solid #3a86ff;
+             box-shadow:0 1px 3px rgba(0,0,0,0.06); font-size:13px; }
+.rev-card.feita { border-left-color:#28a745; }
+.rev-date { font-size:11px; color:#888; }
+</style>
+""", unsafe_allow_html=True)
+
+    # Barra geral
+    col_res = st.columns([3, 1])
+    with col_res[0]:
+        st.markdown(
+            f"<div style='font-size:15px;font-weight:600;margin-bottom:2px'>"
+            f"Progresso geral: {estudados_geral} / {total_geral} assuntos</div>"
+            f"<div class='prog-bar-wrap'>"
+            f"<div class='prog-bar-fill' style='width:{pct_geral}%'></div></div>",
+            unsafe_allow_html=True
+        )
+    with col_res[1]:
+        st.markdown(
+            f"<div style='font-size:36px;font-weight:700;color:#19747E;"
+            f"text-align:center;padding-top:4px'>{pct_geral}%</div>",
+            unsafe_allow_html=True
+        )
+
+    st.divider()
+
+    # ── Abas ─────────────────────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📚 Por disciplina",
+        "🔄 Guia de revisão",
+        "📅 Próximas revisões",
+        "✅ Revisões feitas",
+    ])
+
+    # ── Tab 1: Progresso por disciplina ──────────────────────────────────────
+    with tab1:
+        for disc_nome, info in sorted(disc_map.items()):
+            total = info["total"]
+            feitos = info["estudados"]
+            pct = int(feitos / total * 100) if total else 0
+            cor_barra = "#28a745" if pct == 100 else "#19747E"
+
+            with st.expander(f"{disc_nome}  —  {feitos}/{total}  ({pct}%)", expanded=(pct < 100)):
+                st.markdown(
+                    f"<div class='prog-bar-wrap'>"
+                    f"<div class='prog-bar-fill' style='width:{pct}%;background:{cor_barra}'></div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                # Lista de assuntos
+                rows_html = ""
+                for a in info["assuntos"]:
+                    if a["status"] == "estudado":
+                        dt = a["data_atualizacao"][:10] if a["data_atualizacao"] else a["data"]
+                        try:
+                            dt_fmt = date.fromisoformat(dt).strftime("%d/%m/%Y") if dt else ""
+                        except Exception:
+                            dt_fmt = dt
+                        rows_html += (
+                            f"<div class='prog-assunto-row'>"
+                            f"<span class='prog-feito'>✓ {a['nome']}</span>"
+                            f"<span style='float:right;font-size:11px;color:#aaa'>{dt_fmt}</span>"
+                            f"</div>"
+                        )
+                    else:
+                        rows_html += (
+                            f"<div class='prog-assunto-row'>"
+                            f"<span class='prog-pend'>○ {a['nome']}</span>"
+                            f"</div>"
+                        )
+                st.markdown(rows_html, unsafe_allow_html=True)
+
+    # ── Tab 2: Guia de revisão (estudados, mais antigos primeiro) ────────────
+    with tab2:
+        if not estudados:
+            st.info("Nenhum assunto marcado como estudado ainda.")
+        else:
+            st.caption(
+                f"{len(estudados)} assunto(s) estudados — ordenados do mais antigo ao mais recente. "
+                "Os primeiros são os candidatos prioritários para revisão."
+            )
+            hoje = date.today()
+            for a in estudados:
+                dt_raw = a["data_atualizacao"][:10] if a["data_atualizacao"] else a["data"]
+                try:
+                    dt_obj = date.fromisoformat(dt_raw)
+                    dias_atras = (hoje - dt_obj).days
+                    dt_fmt = dt_obj.strftime("%d/%m/%Y")
+                    urgencia = (
+                        "🔴" if dias_atras >= 30 else
+                        "🟡" if dias_atras >= 7  else
+                        "🟢"
+                    )
+                    tempo_label = f"{dias_atras}d atrás"
+                except Exception:
+                    dt_fmt = dt_raw
+                    urgencia = "⚪"
+                    tempo_label = ""
+
+                st.markdown(
+                    f"<div class='rev-card'>"
+                    f"<span style='font-size:11px;font-weight:700;color:#19747E;"
+                    f"text-transform:uppercase;letter-spacing:.07em'>{a['disciplina_nome']}</span><br>"
+                    f"{urgencia} {a['assunto_nome']}"
+                    f"<span class='rev-date' style='float:right'>{dt_fmt} · {tempo_label}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+    # ── Tab 3: Próximas revisões agendadas ───────────────────────────────────
+    with tab3:
+        if not rev_futuras:
+            st.info("Nenhuma revisão futura agendada.")
+        else:
+            st.caption(f"{len(rev_futuras)} revisão(ões) agendada(s).")
+            for r in rev_futuras:
+                try:
+                    dt_obj = date.fromisoformat(r["data"])
+                    dt_fmt = dt_obj.strftime("%d/%m/%Y")
+                    dias_restantes = (dt_obj - date.today()).days
+                    if dias_restantes < 0:
+                        prazo = f"⚠️ {abs(dias_restantes)}d atrasada"
+                    elif dias_restantes == 0:
+                        prazo = "📌 Hoje"
+                    else:
+                        prazo = f"em {dias_restantes}d"
+                except Exception:
+                    dt_fmt = r["data"]
+                    prazo = ""
+
+                st.markdown(
+                    f"<div class='rev-card'>"
+                    f"<span style='font-size:11px;font-weight:700;color:#3a86ff;"
+                    f"text-transform:uppercase;letter-spacing:.07em'>{r['disciplina_nome']}</span><br>"
+                    f"🔁 {r['assunto_nome']}"
+                    f"<span class='rev-date' style='float:right'>{dt_fmt} · {prazo}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+    # ── Tab 4: Histórico de revisões feitas ──────────────────────────────────
+    with tab4:
+        if not rev_feitas:
+            st.info("Nenhuma revisão concluída ainda.")
+        else:
+            st.caption(f"{len(rev_feitas)} revisão(ões) concluída(s).")
+            for r in rev_feitas:
+                try:
+                    dt_fmt = date.fromisoformat(r["data"]).strftime("%d/%m/%Y")
+                except Exception:
+                    dt_fmt = r["data"]
+                st.markdown(
+                    f"<div class='rev-card feita'>"
+                    f"<span style='font-size:11px;font-weight:700;color:#28a745;"
+                    f"text-transform:uppercase;letter-spacing:.07em'>{r['disciplina_nome']}</span><br>"
+                    f"✅ {r['assunto_nome']}"
+                    f"<span class='rev-date' style='float:right'>{dt_fmt}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+
 def page_estudos():
     st.title("📅 Plano de Estudos")
     usuario = login_atual()
@@ -2557,7 +2845,14 @@ def page_estudos():
     init_estudos(db)
 
     if st.session_state.get("est_plano_aberto_id"):
-        _page_estudos_plano(st.session_state["est_plano_aberto_id"])
+        pid = st.session_state["est_plano_aberto_id"]
+        if st.session_state.get("est_prog_aberto"):
+            # busca nome do plano
+            _planos_all = est_listar_planos(usuario)
+            _nome_plano = next((str(p["nome"]) for p in _planos_all if str(p["_id"]) == pid), "Plano")
+            _page_progresso_plano(pid, _nome_plano)
+        else:
+            _page_estudos_plano(pid)
         return
 
     st.subheader("Seus planos de estudo")
@@ -2579,6 +2874,11 @@ def page_estudos():
                     if st.button("📖 Abrir", key=f"est_abrir_{pid}", use_container_width=True):
                         st.session_state["est_plano_aberto_id"] = pid
                         st.session_state["est_semana_ref"] = date.today()
+                        st.session_state.pop("est_prog_aberto", None)
+                        st.rerun()
+                    if st.button("📊 Progresso", key=f"est_prog_{pid}", use_container_width=True):
+                        st.session_state["est_plano_aberto_id"] = pid
+                        st.session_state["est_prog_aberto"] = True
                         st.rerun()
                 with c3:
                     novo_nome_p = st.text_input("", value=p["nome"], key=f"est_rename_{pid}",
@@ -2645,10 +2945,14 @@ def _page_estudos_plano(plano_id):
     hoje = date.today()
 
     # Cabeçalho
-    col_back, col_title = st.columns([1, 7])
+    col_back, col_prog, col_title = st.columns([1, 1, 5])
     with col_back:
         if st.button("← Voltar", key="est_voltar_planos"):
             st.session_state.pop("est_plano_aberto_id", None)
+            st.rerun()
+    with col_prog:
+        if st.button("📊 Progresso", key="est_btn_progresso"):
+            st.session_state["est_prog_aberto"] = True
             st.rerun()
     with col_title:
         st.title(f"📋 {plano_nome}")
