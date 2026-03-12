@@ -2636,15 +2636,17 @@ def _page_estudos_plano(plano_id):
         st.session_state["est_rev_auto"] = _cfg.get("rev_auto", False)
         st.session_state[_cfg_key] = True
 
+    # Callback nomeado para garantir captura correta do plano_id
+    def _salvar_rev_auto():
+        est_salvar_config_plano(plano_id, rev_auto=st.session_state.get("est_rev_auto", False))
+
     with st.sidebar:
         st.divider()
         st.markdown("**⚙️ Revisão automática**")
         rev_auto = st.checkbox("Agendar revisões ao marcar estudado",
                                value=st.session_state.get("est_rev_auto", False),
                                key="est_rev_auto",
-                               on_change=lambda: est_salvar_config_plano(
-                                   plano_id, rev_auto=st.session_state.get("est_rev_auto", False)
-                               ))
+                               on_change=_salvar_rev_auto)
         if rev_auto:
             st.caption("Ao marcar um assunto como estudado, revisões serão agendadas automaticamente em **+1, +7 e +30 dias**.")
     intervalos_rev = INTERVALOS_REVISAO if rev_auto else []
@@ -3023,10 +3025,10 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                 # -- Botões dos questionários vinculados --
                 if qvs:
                     for qv in qvs:
-                        qvc1, qvc2 = st.columns([5, 1])
+                        qvc1, qvc2, qvc3 = st.columns([2, 6, 1])
                         with qvc1:
                             if st.button(
-                                f"▶  {qv['questionario_nome']}",
+                                "▶ Questões",
                                 key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
                                 use_container_width=True
                             ):
@@ -3034,6 +3036,12 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                                 st.session_state["go_to"] = "Praticar"
                                 st.rerun()
                         with qvc2:
+                            st.markdown(
+                                f"<span style='font-size:12px;color:#555;line-height:2.2'>"
+                                f"{qv['questionario_nome']}</span>",
+                                unsafe_allow_html=True
+                            )
+                        with qvc3:
                             if st.button("✕", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
                                          help="Desvincular"):
                                 est_desvincular_questionario(item["id"], qv["questionario_id"])
@@ -3166,4 +3174,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
