@@ -2842,175 +2842,263 @@ def _page_estudos_plano(plano_id):
             )
 
             # -- Itens do dia --
+            # CSS Typeform-style injetado uma vez por página (idempotente)
+            st.markdown("""
+<style>
+/* Typeform-inspired card */
+.tf-card {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 20px 24px 16px 24px;
+    margin-bottom: 10px;
+    border-left: 4px solid #19747E;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+}
+.tf-card.feito   { border-left-color: #28a745; background: #f6fbf7; }
+.tf-card.revisao { border-left-color: #3a86ff; }
+.tf-card.atividade { border-left-color: #8b5cf6; }
+
+.tf-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: #19747E;
+    margin-bottom: 6px;
+}
+.tf-label.feito { color: #28a745; }
+
+.tf-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #1a1a1a;
+    line-height: 1.45;
+    margin-bottom: 4px;
+}
+.tf-title.feito { color: #888; text-decoration: line-through; }
+
+.tf-desc  { font-size: 13px; color: #666; margin-top: 4px; }
+.tf-divider { border: none; border-top: 1px solid #efefef; margin: 14px 0 10px 0; }
+
+.tf-links { margin-top: 8px; }
+.tf-link  { font-size: 13px; color: #19747E; display: block; margin-bottom: 3px; }
+
+.tf-qv-label {
+    font-size: 11px; font-weight: 700; color: #999;
+    text-transform: uppercase; letter-spacing: 0.07em;
+    margin-top: 12px; margin-bottom: 6px;
+}
+
+/* Botões Streamlit — estilo typeform dentro dos cards */
+div[data-testid="stHorizontalBlock"] button[kind="primaryFormSubmit"],
+div[data-testid="stHorizontalBlock"] button[kind="primary"] {
+    background: #1a1a1a !important;
+    color: #fff !important;
+    border-radius: 6px !important;
+    font-weight: 600 !important;
+    border: none !important;
+}
+div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
+    background: #f2f2f2 !important;
+    color: #333 !important;
+    border-radius: 6px !important;
+    border: 1px solid #ddd !important;
+    font-weight: 500 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
             for item in itens:
                 tipo        = item.get("tipo", "assunto")
                 feito       = item["status"] == "estudado"
                 cor_tipo    = _cor_tipo(tipo)
-                cor_item    = "#28a745" if feito else cor_tipo
-                badge_tipo  = _badge(tipo)
                 novo_status = "pendente" if feito else "estudado"
-                tipo_label  = {"atividade": " [Atividade]", "revisao": " [Revisão]"}.get(tipo, "")
-                icone_s     = "✅" if feito else "⬜"
-                label_btn   = "↩️ Desfazer" if feito else "✅ Feito"
+                label_btn   = "↩ Desfazer" if feito else "✅ Feito"
 
-                with st.container(border=True):
-                    # Título — largura total
-                    disc_txt = (
-                        f"<span style='color:{cor_item};font-weight:600'>"
-                        f"{item['disciplina_nome']}</span> — "
-                    ) if item["disciplina_nome"] else ""
-                    st.markdown(
-                        f"{icone_s} {badge_tipo}{disc_txt}"
-                        f"{item['assunto_nome']}"
-                        f"<span style='font-size:11px;color:#888'>{tipo_label}</span>",
-                        unsafe_allow_html=True
-                    )
-                    if item.get("descricao"):
-                        st.caption(item["descricao"])
+                # classes CSS dinâmicas
+                card_cls  = f"tf-card {tipo if tipo != 'assunto' else ''} {'feito' if feito else ''}".strip()
+                label_cls = f"tf-label {'feito' if feito else ''}"
+                title_cls = f"tf-title {'feito' if feito else ''}"
 
-                    # Botões — linha separada com proporções generosas
-                    cb, cc, cd = st.columns(3)
-                    with cb:
-                        if st.button(label_btn, key=f"est_mk_{item['id']}",
-                                     use_container_width=True):
-                            est_marcar_status(
-                                item["id"], novo_status,
-                                plano_id=plano_id,
-                                agendar_revisoes_auto=rev_auto,
-                                intervalos_revisao=intervalos_rev if rev_auto else []
-                            )
+                # label acima: disciplina ou tipo
+                if tipo == "revisao":
+                    label_txt = "Revisão"
+                elif tipo == "atividade":
+                    label_txt = "Atividade"
+                else:
+                    label_txt = item["disciplina_nome"] or ""
+
+                # Monta o HTML do card (apenas conteúdo estático)
+                divider_html = "<hr class='tf-divider'>"
+
+                # Links externos como HTML inline
+                lnks = item.get("links", [])
+                links_html = ""
+                if lnks:
+                    links_html = "<div class='tf-links'>"
+                    for lnk in lnks:
+                        links_html += f"<a class='tf-link' href='{lnk['url']}' target='_blank'>🔗 {lnk['titulo']}</a>"
+                    links_html += "</div>"
+
+                # Questionários vinculados — label
+                qvs = item.get("questionarios_vinculados", [])
+                qv_label_html = "<div class='tf-qv-label'>Questionários vinculados</div>" if qvs else ""
+
+                st.markdown(
+                    f"<div class='{card_cls}'>"
+                    f"<div class='{label_cls}'>{label_txt}</div>"
+                    f"<div class='{title_cls}'>{item['assunto_nome']}</div>"
+                    + (f"<div class='tf-desc'>{item['descricao']}</div>" if item.get('descricao') else "")
+                    + links_html
+                    + qv_label_html
+                    + f"</div>",
+                    unsafe_allow_html=True
+                )
+
+                # -- Botões de ação --
+                b_feito, b_mover, b_excluir = st.columns([2, 1, 1])
+                with b_feito:
+                    if st.button(label_btn, key=f"est_mk_{item['id']}",
+                                 type="primary" if not feito else "secondary",
+                                 use_container_width=True):
+                        est_marcar_status(
+                            item["id"], novo_status,
+                            plano_id=plano_id,
+                            agendar_revisoes_auto=rev_auto,
+                            intervalos_revisao=intervalos_rev if rev_auto else []
+                        )
+                        st.rerun()
+                with b_mover:
+                    if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
+                                 use_container_width=True):
+                        if st.session_state.get("est_realocando_id") == item["id"]:
+                            st.session_state.pop("est_realocando_id", None)
+                        else:
+                            st.session_state["est_realocando_id"] = item["id"]
+                        st.rerun()
+                with b_excluir:
+                    if st.button("Excluir", key=f"est_rm_{item['id']}",
+                                 use_container_width=True):
+                        est_remover_planejamento(item["id"])
+                        st.session_state.pop("est_realocando_id", None)
+                        st.rerun()
+
+                # -- Painel mover --
+                if st.session_state.get("est_realocando_id") == item["id"]:
+                    st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
+                    rc1, rc2, rc3 = st.columns([3, 1, 1])
+                    with rc1:
+                        nova_data = st.date_input(
+                            "Mover para", value=dia_date,
+                            key=f"est_nova_data_{item['id']}"
+                        )
+                    with rc2:
+                        st.write("")
+                        st.write("")
+                        if st.button("Confirmar", key=f"est_confirmar_realoc_{item['id']}",
+                                     type="primary", use_container_width=True):
+                            est_realocar_assunto(item["id"], nova_data.strftime("%Y-%m-%d"))
+                            st.session_state.pop("est_realocando_id", None)
                             st.rerun()
-                    with cc:
-                        if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
+                    with rc3:
+                        st.write("")
+                        st.write("")
+                        if st.button("Cancelar", key=f"est_cancelar_realoc_{item['id']}",
                                      use_container_width=True):
-                            if st.session_state.get("est_realocando_id") == item["id"]:
-                                st.session_state.pop("est_realocando_id", None)
-                            else:
-                                st.session_state["est_realocando_id"] = item["id"]
-                            st.rerun()
-                    with cd:
-                        if st.button("Excluir", key=f"est_rm_{item['id']}",
-                                     use_container_width=True):
-                            est_remover_planejamento(item["id"])
                             st.session_state.pop("est_realocando_id", None)
                             st.rerun()
 
-                    # -- Painel mover --
-                    if st.session_state.get("est_realocando_id") == item["id"]:
-                        with st.container():
-                            st.caption("📅 Mover para:")
-                            rc1, rc2, rc3 = st.columns([3, 1, 1])
-                            with rc1:
-                                nova_data = st.date_input(
-                                    "", value=dia_date, label_visibility="collapsed",
-                                    key=f"est_nova_data_{item['id']}"
+                # -- Remover links individuais --
+                if lnks:
+                    st.markdown("<div style='margin-top:2px'></div>", unsafe_allow_html=True)
+                    for li, lnk in enumerate(lnks):
+                        lc1, lc2 = st.columns([6, 1])
+                        with lc1:
+                            st.caption(f"🔗 {lnk['titulo']}")
+                        with lc2:
+                            if st.button("✕", key=f"est_rl_{item['id']}_{li}", help="Remover link"):
+                                est_remover_link(item["id"], li)
+                                st.rerun()
+
+                # -- Botões dos questionários vinculados --
+                if qvs:
+                    for qv in qvs:
+                        qvc1, qvc2 = st.columns([5, 1])
+                        with qvc1:
+                            if st.button(
+                                f"▶  {qv['questionario_nome']}",
+                                key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
+                                use_container_width=True
+                            ):
+                                st.session_state["current_qid"] = qv["questionario_id"]
+                                st.session_state["go_to"] = "Praticar"
+                                st.rerun()
+                        with qvc2:
+                            if st.button("✕", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
+                                         help="Desvincular"):
+                                est_desvincular_questionario(item["id"], qv["questionario_id"])
+                                st.rerun()
+
+                # -- Expanders de ação --
+                exp1, exp2 = st.columns(2)
+                with exp1:
+                    with st.expander("📝 Vincular questionário"):
+                        todos_qs = get_questionarios()
+                        qs_uteis = [q for q in todos_qs if q.get("disciplina") != "— Sistema —"]
+                        if not qs_uteis:
+                            st.caption("Nenhum questionário disponível.")
+                        else:
+                            discs_qs = sorted({(q.get("disciplina") or "Sem Disciplina")
+                                               for q in qs_uteis
+                                               if q.get("disciplina") not in ("— Sistema —", None)})
+                            disc_filt = st.selectbox(
+                                "Disciplina", ["Todas"] + discs_qs,
+                                key=f"est_qfilt_disc_{item['id']}"
+                            )
+                            qs_filtrados = qs_uteis if disc_filt == "Todas" else [
+                                q for q in qs_uteis
+                                if (q.get("disciplina") or "Sem Disciplina") == disc_filt
+                            ]
+                            busca_q = st.text_input(
+                                "Buscar", key=f"est_qbusca_{item['id']}",
+                                placeholder="Nome do questionário..."
+                            )
+                            if busca_q:
+                                qs_filtrados = [q for q in qs_filtrados
+                                                if busca_q.lower() in q["nome"].lower()]
+                            if qs_filtrados:
+                                q_opcoes = {q["id"]: q["nome"] for q in qs_filtrados}
+                                q_sel_id = st.selectbox(
+                                    "Questionário", list(q_opcoes.keys()),
+                                    format_func=lambda x: q_opcoes[x],
+                                    key=f"est_qsel_{item['id']}"
                                 )
-                            with rc2:
-                                if st.button("Confirmar", key=f"est_confirmar_realoc_{item['id']}",
+                                q_sel = next((q for q in qs_filtrados if q["id"] == q_sel_id), None)
+                                if st.button("Vincular", key=f"est_qvincular_{item['id']}",
                                              type="primary", use_container_width=True):
-                                    est_realocar_assunto(item["id"], nova_data.strftime("%Y-%m-%d"))
-                                    st.session_state.pop("est_realocando_id", None)
-                                    st.rerun()
-                            with rc3:
-                                if st.button("Cancelar", key=f"est_cancelar_realoc_{item['id']}",
-                                             use_container_width=True):
-                                    st.session_state.pop("est_realocando_id", None)
-                                    st.rerun()
-
-                    # -- Links externos --
-                    lnks = item.get("links", [])
-                    if lnks:
-                        for li, lnk in enumerate(lnks):
-                            lc1, lc2 = st.columns([5, 1])
-                            with lc1:
-                                st.markdown(
-                                    f"<span style='font-size:12px'>🔗 <a href='{lnk['url']}' "
-                                    f"target='_blank'>{lnk['titulo']}</a></span>",
-                                    unsafe_allow_html=True
-                                )
-                            with lc2:
-                                if st.button("Remover", key=f"est_rl_{item['id']}_{li}"):
-                                    est_remover_link(item["id"], li)
-                                    st.rerun()
-
-                    # -- Questionários vinculados --
-                    qvs = item.get("questionarios_vinculados", [])
-                    if qvs:
-                        st.caption("📝 Questionários vinculados:")
-                        for qv in qvs:
-                            qvc1, qvc2 = st.columns([5, 1])
-                            with qvc1:
-                                if st.button(
-                                    f"▶ Praticar: {qv['questionario_nome']}",
-                                    key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
-                                    use_container_width=True
-                                ):
-                                    st.session_state["current_qid"] = qv["questionario_id"]
-                                    st.session_state["go_to"] = "Praticar"
-                                    st.rerun()
-                            with qvc2:
-                                if st.button("Remover", key=f"est_desvq_{item['id']}_{qv['questionario_id']}"):
-                                    est_desvincular_questionario(item["id"], qv["questionario_id"])
-                                    st.rerun()
-
-                    # -- Expanders de ação --
-                    exp1, exp2 = st.columns(2)
-                    with exp1:
-                        with st.expander("📝 Vincular questionário"):
-                            todos_qs = get_questionarios()
-                            qs_uteis = [q for q in todos_qs if q.get("disciplina") != "— Sistema —"]
-                            if not qs_uteis:
-                                st.caption("Nenhum questionário disponível.")
+                                    if q_sel:
+                                        ok = est_vincular_questionario(
+                                            item["id"], q_sel["id"],
+                                            q_sel["nome"], q_sel.get("disciplina", "")
+                                        )
+                                        if ok:
+                                            st.success("Vinculado!")
+                                            st.rerun()
+                                        else:
+                                            st.info("Já vinculado.")
                             else:
-                                discs_qs = sorted({(q.get("disciplina") or "Sem Disciplina")
-                                                   for q in qs_uteis
-                                                   if q.get("disciplina") not in ("— Sistema —", None)})
-                                disc_filt = st.selectbox(
-                                    "Disciplina", ["Todas"] + discs_qs,
-                                    key=f"est_qfilt_disc_{item['id']}"
-                                )
-                                qs_filtrados = qs_uteis if disc_filt == "Todas" else [
-                                    q for q in qs_uteis
-                                    if (q.get("disciplina") or "Sem Disciplina") == disc_filt
-                                ]
-                                busca_q = st.text_input(
-                                    "Buscar", key=f"est_qbusca_{item['id']}",
-                                    placeholder="Nome do questionário..."
-                                )
-                                if busca_q:
-                                    qs_filtrados = [q for q in qs_filtrados
-                                                    if busca_q.lower() in q["nome"].lower()]
-                                if qs_filtrados:
-                                    q_opcoes = {q["id"]: q["nome"] for q in qs_filtrados}
-                                    q_sel_id = st.selectbox(
-                                        "Questionário", list(q_opcoes.keys()),
-                                        format_func=lambda x: q_opcoes[x],
-                                        key=f"est_qsel_{item['id']}"
-                                    )
-                                    q_sel = next((q for q in qs_filtrados if q["id"] == q_sel_id), None)
-                                    if st.button("Vincular", key=f"est_qvincular_{item['id']}",
-                                                 type="primary", use_container_width=True):
-                                        if q_sel:
-                                            ok = est_vincular_questionario(
-                                                item["id"], q_sel["id"],
-                                                q_sel["nome"], q_sel.get("disciplina", "")
-                                            )
-                                            if ok:
-                                                st.success("Vinculado!")
-                                                st.rerun()
-                                            else:
-                                                st.info("Já vinculado.")
-                                else:
-                                    st.caption("Nenhum questionário encontrado.")
-                    with exp2:
-                        with st.expander("🔗 Adicionar link externo"):
-                            with st.form(key=f"est_add_link_{item['id']}"):
-                                lt = st.text_input("Título", key=f"est_lt_{item['id']}")
-                                lu = st.text_input("URL", key=f"est_lu_{item['id']}")
-                                if st.form_submit_button("Adicionar"):
-                                    if lt and lu:
-                                        est_adicionar_link(item["id"], lt, lu)
-                                        st.rerun()
+                                st.caption("Nenhum questionário encontrado.")
+                with exp2:
+                    with st.expander("🔗 Adicionar link"):
+                        with st.form(key=f"est_add_link_{item['id']}"):
+                            lt = st.text_input("Título", key=f"est_lt_{item['id']}")
+                            lu = st.text_input("URL", key=f"est_lu_{item['id']}")
+                            if st.form_submit_button("Adicionar"):
+                                if lt and lu:
+                                    est_adicionar_link(item["id"], lt, lu)
+                                    st.rerun()
+
+                st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
 
             # -- Adicionar atividade manual --
             with st.expander(f"➕ Atividade — {dias_semana_nomes[offset].split('-')[0]}, {dia_date.day:02d}/{dia_date.month:02d}"):
