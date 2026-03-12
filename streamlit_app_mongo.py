@@ -2961,22 +2961,23 @@ def _page_estudos_plano(plano_id):
     INTERVALOS_REVISAO = [1, 7, 30]  # fixo: +1, +7, +30 dias
 
     # Carrega preferência salva no banco na primeira vez que o plano é aberto
-    _cfg_key = f"est_rev_auto_loaded_{plano_id}"
-    if _cfg_key not in st.session_state:
+    # Chave única por plano — garante que o valor persiste mesmo trocando de aba
+    _rev_key = f"est_rev_auto_{plano_id}"
+
+    # Carrega do banco apenas na primeira vez que este plano é aberto na sessão
+    if _rev_key not in st.session_state:
         _cfg = est_carregar_config_plano(plano_id)
-        st.session_state["est_rev_auto"] = _cfg.get("rev_auto", False)
-        st.session_state[_cfg_key] = True
+        st.session_state[_rev_key] = _cfg.get("rev_auto", False)
 
     # Callback nomeado para garantir captura correta do plano_id
     def _salvar_rev_auto():
-        est_salvar_config_plano(plano_id, rev_auto=st.session_state.get("est_rev_auto", False))
+        est_salvar_config_plano(plano_id, rev_auto=st.session_state.get(_rev_key, False))
 
     with st.sidebar:
         st.divider()
         st.markdown("**⚙️ Revisão automática**")
         rev_auto = st.checkbox("Agendar revisões ao marcar estudado",
-                               value=st.session_state.get("est_rev_auto", False),
-                               key="est_rev_auto",
+                               key=_rev_key,
                                on_change=_salvar_rev_auto)
         if rev_auto:
             st.caption("Ao marcar um assunto como estudado, revisões serão agendadas automaticamente em **+1, +7 e +30 dias**.")
