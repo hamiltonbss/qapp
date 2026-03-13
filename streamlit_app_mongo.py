@@ -2641,7 +2641,7 @@ def _cor_tipo(tipo):
 # =============================
 def _page_progresso_plano(plano_id, plano_nome):
     """Página de progresso e guia de revisões do plano."""
-    if st.button("← Voltar ao plano", key="prog_voltar"):
+    if st.button("← Voltar ao plano", key="prog_voltar", help="Voltar para a agenda semanal do plano"):
         st.session_state.pop("est_prog_aberto", None)
         st.rerun()
 
@@ -2718,7 +2718,7 @@ def _page_progresso_plano(plano_id, plano_nome):
             pct = int(feitos / total * 100) if total else 0
             cor_barra = "#28a745" if pct == 100 else "#19747E"
 
-            with st.expander(f"{disc_nome}  —  {feitos}/{total}  ({pct}%)", expanded=(pct < 100)):
+            with st.expander(f"{disc_nome}  —  {feitos}/{total}  ({pct}%)", expanded=False):
                 st.markdown(
                     f"<div class='prog-bar-wrap'>"
                     f"<div class='prog-bar-fill' style='width:{pct}%;background:{cor_barra}'></div>"
@@ -2871,19 +2871,19 @@ def page_estudos():
                     if criado:
                         st.caption(f"Criado em {criado}")
                 with c2:
-                    if st.button("📖 Abrir", key=f"est_abrir_{pid}", use_container_width=True):
+                    if st.button("📖 Abrir", key=f"est_abrir_{pid}", use_container_width=True, help="Abrir a agenda semanal deste plano"):
                         st.session_state["est_plano_aberto_id"] = pid
                         st.session_state["est_semana_ref"] = date.today()
                         st.session_state.pop("est_prog_aberto", None)
                         st.rerun()
-                    if st.button("📊 Progresso", key=f"est_prog_{pid}", use_container_width=True):
+                    if st.button("📊 Progresso", key=f"est_prog_{pid}", use_container_width=True, help="Ver progresso geral, guia de revisões e histórico"):
                         st.session_state["est_plano_aberto_id"] = pid
                         st.session_state["est_prog_aberto"] = True
                         st.rerun()
                 with c3:
                     novo_nome_p = st.text_input("", value=p["nome"], key=f"est_rename_{pid}",
                                                 label_visibility="collapsed", placeholder="Renomear...")
-                    if st.button("✏️ Renomear", key=f"est_btn_rename_{pid}", use_container_width=True):
+                    if st.button("✏️ Renomear", key=f"est_btn_rename_{pid}", use_container_width=True, help="Salvar o novo nome digitado para este plano"):
                         if novo_nome_p.strip():
                             est_renomear_plano(pid, novo_nome_p)
                             st.rerun()
@@ -2896,12 +2896,12 @@ def page_estudos():
                     st.warning(f"Confirma exclusão do plano **{p['nome']}** e todos os seus dados?")
                     cc1, cc2 = st.columns(2)
                     with cc1:
-                        if st.button("Sim, excluir", key=f"est_confirma_del_{pid}", type="primary"):
+                        if st.button("Sim, excluir", key=f"est_confirma_del_{pid}", type="primary", help="Confirmar exclusão permanente do plano e todos os seus dados"):
                             est_excluir_plano(pid)
                             st.session_state.pop(f"est_confirm_del_plano_{pid}", None)
                             st.rerun()
                     with cc2:
-                        if st.button("Cancelar", key=f"est_cancela_del_{pid}"):
+                        if st.button("Cancelar", key=f"est_cancela_del_{pid}", help="Cancelar e manter o plano"):
                             st.session_state.pop(f"est_confirm_del_plano_{pid}", None)
                             st.rerun()
 
@@ -2914,7 +2914,7 @@ def page_estudos():
     with c2:
         st.write("")
         st.write("")
-        if st.button("Criar plano", key="est_btn_criar_plano", type="primary"):
+        if st.button("Criar plano", key="est_btn_criar_plano", type="primary", help="Criar um novo plano de estudos com o nome informado"):
             if novo_plano_nome.strip():
                 pid = est_criar_plano(usuario, novo_plano_nome.strip())
                 if pid:
@@ -2947,11 +2947,11 @@ def _page_estudos_plano(plano_id):
     # Cabeçalho
     col_back, col_prog, col_title = st.columns([1, 1, 5])
     with col_back:
-        if st.button("← Voltar", key="est_voltar_planos"):
+        if st.button("← Voltar", key="est_voltar_planos", help="Voltar para a lista de planos"):
             st.session_state.pop("est_plano_aberto_id", None)
             st.rerun()
     with col_prog:
-        if st.button("📊 Progresso", key="est_btn_progresso"):
+        if st.button("📊 Progresso", key="est_btn_progresso", help="Ver progresso geral, guia de revisões e histórico deste plano"):
             st.session_state["est_prog_aberto"] = True
             st.rerun()
     with col_title:
@@ -2993,7 +2993,7 @@ def _page_estudos_plano(plano_id):
     meses_pt = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"]
     nav1, nav2, nav3, nav4 = st.columns([1, 1, 3, 1])
     with nav1:
-        if st.button("◀ Anterior", key="est_sem_ant"):
+        if st.button("◀ Anterior", key="est_sem_ant", help="Ir para a semana anterior"):
             st.session_state["est_semana_ref"] = segunda - timedelta(days=7)
             st.rerun()
     with nav2:
@@ -3008,7 +3008,7 @@ def _page_estudos_plano(plano_id):
             unsafe_allow_html=True
         )
     with nav4:
-        if st.button("Próxima ▶", key="est_sem_prox"):
+        if st.button("Próxima ▶", key="est_sem_prox", help="Ir para a próxima semana"):
             st.session_state["est_semana_ref"] = segunda + timedelta(days=7)
             st.rerun()
 
@@ -3092,7 +3092,7 @@ def _page_estudos_plano(plano_id):
                         st.warning("Selecione ao menos um dia da semana.")
 
                     if st.button("Distribuir", key="est_btn_distribuir", type="primary",
-                                 disabled=not dias_sel):
+                                 disabled=not dias_sel, help="Alocar automaticamente todos os assuntos no calendário conforme as configurações acima"):
                         alocados, ja_ex = est_distribuir_disciplina(
                             plano_id, disc_sel_id, disc_sel_nome,
                             d_ini, dias_sel, intervalo_val, apd_val
@@ -3122,19 +3122,19 @@ def _page_estudos_plano(plano_id):
                     novo_nome_a = st.text_input("Nome", value=assunto_sel_nome, key="est_edit_assunto_nome")
                     c1, c2 = st.columns(2)
                     with c1:
-                        if st.button("💾 Salvar", key="est_salvar_assunto"):
+                        if st.button("💾 Salvar", key="est_salvar_assunto", help="Salvar o novo nome do assunto"):
                             if novo_nome_a.strip():
                                 est_editar_assunto(assunto_sel_id, novo_nome_a)
                                 st.success("Salvo.")
                                 st.rerun()
                     with c2:
-                        if st.button("🗑️ Excluir", key="est_del_assunto"):
+                        if st.button("🗑️ Excluir", key="est_del_assunto", help="Excluir este assunto permanentemente"):
                             est_excluir_assunto(assunto_sel_id)
                             st.rerun()
 
                 st.markdown("**Alocar assunto no dia:**")
                 dia_sel = st.date_input("", value=hoje, key="est_dia_sel", label_visibility="collapsed", format="DD/MM/YYYY")
-                if st.button("📌 Alocar", key="est_btn_alocar", use_container_width=True):
+                if st.button("📌 Alocar", key="est_btn_alocar", use_container_width=True, help="Adicionar este assunto no dia selecionado"):
                     ok = est_alocar_assunto(
                         plano_id, dia_sel.strftime("%Y-%m-%d"),
                         assunto_sel_id, disc_sel_id, disc_sel_nome, assunto_sel_nome
@@ -3314,7 +3314,8 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                 with b_feito:
                     if st.button(label_btn, key=f"est_mk_{item['id']}",
                                  type="primary" if not feito else "secondary",
-                                 use_container_width=True):
+                                 use_container_width=True,
+                                 help="Marcar como estudado" if not feito else "Desfazer marcação de estudado"):
                         est_marcar_status(
                             item["id"], novo_status,
                             plano_id=plano_id,
@@ -3324,7 +3325,7 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                         st.rerun()
                 with b_mover:
                     if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
-                                 use_container_width=True):
+                                 use_container_width=True, help="Mover este item para outro dia"):
                         if st.session_state.get("est_realocando_id") == item["id"]:
                             st.session_state.pop("est_realocando_id", None)
                         else:
@@ -3332,7 +3333,7 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                         st.rerun()
                 with b_excluir:
                     if st.button("Excluir", key=f"est_rm_{item['id']}",
-                                 use_container_width=True):
+                                 use_container_width=True, help="Remover este item do planejamento"):
                         est_remover_planejamento(item["id"])
                         st.session_state.pop("est_realocando_id", None)
                         st.rerun()
@@ -3350,7 +3351,7 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                         st.write("")
                         st.write("")
                         if st.button("Confirmar", key=f"est_confirmar_realoc_{item['id']}",
-                                     type="primary", use_container_width=True):
+                                     type="primary", use_container_width=True, help="Confirmar a nova data"):
                             est_realocar_assunto(item["id"], nova_data.strftime("%Y-%m-%d"))
                             st.session_state.pop("est_realocando_id", None)
                             st.rerun()
@@ -3358,7 +3359,7 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                         st.write("")
                         st.write("")
                         if st.button("Cancelar", key=f"est_cancelar_realoc_{item['id']}",
-                                     use_container_width=True):
+                                     use_container_width=True, help="Cancelar a realocação"):
                             st.session_state.pop("est_realocando_id", None)
                             st.rerun()
 
@@ -3382,7 +3383,8 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                             if st.button(
                                 "▶ Questões",
                                 key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
-                                use_container_width=True
+                                use_container_width=True,
+                                help="Abrir este questionário na tela Praticar"
                             ):
                                 st.session_state["current_qid"] = qv["questionario_id"]
                                 st.session_state["go_to"] = "Praticar"
@@ -3435,7 +3437,8 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                                 )
                                 q_sel = next((q for q in qs_filtrados if q["id"] == q_sel_id), None)
                                 if st.button("Vincular", key=f"est_qvincular_{item['id']}",
-                                             type="primary", use_container_width=True):
+                                             type="primary", use_container_width=True,
+                                             help="Vincular o questionário selecionado a este assunto"):
                                     if q_sel:
                                         ok = est_vincular_questionario(
                                             item["id"], q_sel["id"],
