@@ -2409,6 +2409,44 @@ def est_realocar_assunto(item_id, nova_data_str):
         {"$set": {"data": nova_data_str, "data_atualizacao": datetime.now(timezone.utc).isoformat()}}
     )
 
+def est_continuar_assunto(plano_id, item_id, nova_data_str, anotacao=""):
+    """
+    Copia o item para uma nova data mantendo o original.
+    A cópia fica com tipo 'assunto', status 'pendente' e a anotação
+    de onde o usuário parou na descrição.
+    """
+    db = get_db()
+    origem = db.est_planejamento.find_one({"_id": ObjectId(item_id)})
+    if not origem:
+        return False
+    # Verifica se já existe cópia deste assunto na data alvo
+    ja_existe = db.est_planejamento.find_one({
+        "plano_id": ObjectId(plano_id),
+        "data": nova_data_str,
+        "assunto_id": origem.get("assunto_id"),
+        "continuacao_de": item_id,
+    })
+    if ja_existe:
+        return False
+    db.est_planejamento.insert_one({
+        "plano_id": ObjectId(plano_id),
+        "data": nova_data_str,
+        "assunto_id": origem.get("assunto_id"),
+        "disciplina_id": origem.get("disciplina_id"),
+        "disciplina_nome": origem.get("disciplina_nome", ""),
+        "assunto_nome": origem.get("assunto_nome", ""),
+        "descricao": anotacao.strip(),
+        "tipo": "assunto",
+        "status": "pendente",
+        "links": [],
+        "ordem_assunto": origem.get("ordem_assunto", 9999),
+        "continuacao_de": item_id,   # referência ao item original
+        "questionarios_vinculados": origem.get("questionarios_vinculados", []),
+        "data_criacao": datetime.now(timezone.utc).isoformat(),
+    })
+    return True
+
+
 def est_adicionar_atividade(plano_id, data_str, titulo, descricao=""):
     """Adiciona atividade manual (não vinculada a assunto/disciplina)."""
     db = get_db()
@@ -2512,6 +2550,7 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
             "links": d.get("links", []),
             "disciplina_id": str(d.get("disciplina_id", "")) if d.get("disciplina_id") else "",
             "questionarios_vinculados": d.get("questionarios_vinculados", []),
+            "continuacao_de": d.get("continuacao_de", None),
         })
     return por_data
 
@@ -3287,6 +3326,8 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                     label_txt = "Revisão"
                 elif tipo == "atividade":
                     label_txt = "Atividade"
+                elif item.get("continuacao_de"):
+                    label_txt = f"↪ {item['disciplina_nome']} (continuação)" if item["disciplina_nome"] else "↪ Continuação"
                 else:
                     label_txt = item["disciplina_nome"] or ""
 
@@ -3318,7 +3359,7 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                 )
 
                 # -- Botões de ação --
-                b_feito, b_mover, b_excluir = st.columns([2, 1, 1])
+                b_feito, b_cont, b_mover, b_excluir = st.columns([2, 1, 1, 1])
                 with b_feito:
                     if st.button(label_btn, key=f"est_mk_{item['id']}",
                                  type="primary" if not feito else "secondary",
@@ -3331,6 +3372,17 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                             intervalos_revisao=intervalos_rev if rev_auto else []
                         )
                         st.rerun()
+                with b_cont:
+                    if st.button("Continuar", key=f"est_cont_btn_{item['id']}",
+                                 use_container_width=True,
+                                 help="Copiar este assunto para outro dia com anotação de onde parou"):
+                        ck = f"est_continuando_id"
+                        if st.session_state.get(ck) == item["id"]:
+                            st.session_state.pop(ck, None)
+                        else:
+                            st.session_state[ck] = item["id"]
+                            st.session_state.pop("est_realocando_id", None)
+                        st.rerun()
                 with b_mover:
                     if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
                                  use_container_width=True, help="Mover este item para outro dia"):
@@ -3338,12 +3390,14 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                             st.session_state.pop("est_realocando_id", None)
                         else:
                             st.session_state["est_realocando_id"] = item["id"]
+                            st.session_state.pop("est_continuando_id", None)
                         st.rerun()
                 with b_excluir:
                     if st.button("Excluir", key=f"est_rm_{item['id']}",
                                  use_container_width=True, help="Remover este item do planejamento"):
                         est_remover_planejamento(item["id"])
                         st.session_state.pop("est_realocando_id", None)
+                        st.session_state.pop("est_continuando_id", None)
                         st.rerun()
 
                 # -- Painel mover --
@@ -3369,6 +3423,52 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                         if st.button("Cancelar", key=f"est_cancelar_realoc_{item['id']}",
                                      use_container_width=True, help="Cancelar a realocação"):
                             st.session_state.pop("est_realocando_id", None)
+                            st.rerun()
+
+                # -- Painel continuar --
+                if st.session_state.get("est_continuando_id") == item["id"]:
+                    st.markdown("<hr style='border:none;border-top:1px solid #e8e8e8;margin:8px 0'>",
+                                unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='font-size:11px;font-weight:700;color:#8b5cf6;"
+                        "text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px'>"
+                        "↪ Continuar em outro dia</div>",
+                        unsafe_allow_html=True
+                    )
+                    cc1, cc2 = st.columns([2, 3])
+                    with cc1:
+                        cont_data = st.date_input(
+                            "Data", value=dia_date + timedelta(days=1),
+                            key=f"est_cont_data_{item['id']}", format="DD/MM/YYYY",
+                            help="Dia em que continuará o estudo deste assunto"
+                        )
+                    with cc2:
+                        cont_nota = st.text_area(
+                            "Onde parei / anotações",
+                            key=f"est_cont_nota_{item['id']}",
+                            height=68,
+                            placeholder="Ex: parei no art. 37, falta estudar incisos IV ao VIII..."
+                        )
+                    ca1, ca2 = st.columns([1, 1])
+                    with ca1:
+                        if st.button("Confirmar", key=f"est_cont_ok_{item['id']}",
+                                     type="primary", use_container_width=True,
+                                     help="Criar cópia deste assunto na data escolhida"):
+                            ok = est_continuar_assunto(
+                                plano_id, item["id"],
+                                cont_data.strftime("%Y-%m-%d"),
+                                st.session_state.get(f"est_cont_nota_{item['id']}", "")
+                            )
+                            st.session_state.pop("est_continuando_id", None)
+                            if ok:
+                                st.rerun()
+                            else:
+                                st.warning("Já existe uma continuação deste assunto nesta data.")
+                    with ca2:
+                        if st.button("Cancelar", key=f"est_cont_cancel_{item['id']}",
+                                     use_container_width=True,
+                                     help="Cancelar"):
+                            st.session_state.pop("est_continuando_id", None)
                             st.rerun()
 
                 # -- Remover links individuais --
