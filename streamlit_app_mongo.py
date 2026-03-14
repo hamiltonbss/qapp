@@ -3226,25 +3226,19 @@ def _page_estudos_plano(plano_id):
                 bg_header = "#f0f2f6"
                 icone_dia = ""
 
-            borda_cor = "#19747E" if eh_hoje else "#dee2e6"
-            borda_esp = "3px" if eh_hoje else "1px"
-            hoje_tag  = " 📌 <b>HOJE</b>" if eh_hoje else ""
-            resumo    = f"&nbsp;·&nbsp;{len(itens)} item(ns)" if itens else "&nbsp;·&nbsp;livre"
+            hoje_label = " 📌 HOJE" if eh_hoje else ""
+            resumo     = f"{len(itens)} item(ns)" if itens else "livre"
+            exp_label  = (
+                f"{icone_dia} {dias_semana_nomes[offset]}, "
+                f"{dia_date.day:02d}/{dia_date.month:02d}"
+                f"{hoje_label}  ·  {resumo}"
+            ).strip()
 
-            st.markdown(
-                f"<div style='background:{bg_header};border:{borda_esp} solid {borda_cor};"
-                f"border-radius:10px;padding:8px 14px;margin-bottom:4px'>"
-                f"<span style='font-size:15px;font-weight:bold;color:#19747E'>"
-                f"{icone_dia} {dias_semana_nomes[offset]}, {dia_date.day:02d}/{dia_date.month:02d}"
-                f"{hoje_tag}</span>"
-                f"<span style='font-size:12px;color:#555'> {resumo}</span>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
+            with st.expander(exp_label, expanded=eh_hoje):
 
-            # -- Itens do dia --
-            # CSS Typeform-style injetado uma vez por página (idempotente)
-            st.markdown("""
+                # -- Itens do dia --
+                # CSS Typeform-style injetado uma vez por página (idempotente)
+              st.markdown("""
 <style>
 /* Typeform-inspired card */
 .tf-card {
@@ -3309,282 +3303,282 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
 </style>
 """, unsafe_allow_html=True)
 
-            for item in itens:
-                tipo        = item.get("tipo", "assunto")
-                feito       = item["status"] == "estudado"
-                cor_tipo    = _cor_tipo(tipo)
-                novo_status = "pendente" if feito else "estudado"
-                label_btn   = "↩ Desfazer" if feito else "✅ Feito"
+              for item in itens:
+                  tipo        = item.get("tipo", "assunto")
+                  feito       = item["status"] == "estudado"
+                  cor_tipo    = _cor_tipo(tipo)
+                  novo_status = "pendente" if feito else "estudado"
+                  label_btn   = "↩ Desfazer" if feito else "✅ Feito"
 
-                # classes CSS dinâmicas
-                card_cls  = f"tf-card {tipo if tipo != 'assunto' else ''} {'feito' if feito else ''}".strip()
-                label_cls = f"tf-label {'feito' if feito else ''}"
-                title_cls = f"tf-title {'feito' if feito else ''}"
+                  # classes CSS dinâmicas
+                  card_cls  = f"tf-card {tipo if tipo != 'assunto' else ''} {'feito' if feito else ''}".strip()
+                  label_cls = f"tf-label {'feito' if feito else ''}"
+                  title_cls = f"tf-title {'feito' if feito else ''}"
 
-                # label acima: disciplina ou tipo
-                if tipo == "revisao":
-                    label_txt = "Revisão"
-                elif tipo == "atividade":
-                    label_txt = "Atividade"
-                elif item.get("continuacao_de"):
-                    label_txt = f"↪ {item['disciplina_nome']} (continuação)" if item["disciplina_nome"] else "↪ Continuação"
-                else:
-                    label_txt = item["disciplina_nome"] or ""
+                  # label acima: disciplina ou tipo
+                  if tipo == "revisao":
+                      label_txt = "Revisão"
+                  elif tipo == "atividade":
+                      label_txt = "Atividade"
+                  elif item.get("continuacao_de"):
+                      label_txt = f"↪ {item['disciplina_nome']} (continuação)" if item["disciplina_nome"] else "↪ Continuação"
+                  else:
+                      label_txt = item["disciplina_nome"] or ""
 
-                # Monta o HTML do card (apenas conteúdo estático)
-                divider_html = "<hr class='tf-divider'>"
+                  # Monta o HTML do card (apenas conteúdo estático)
+                  divider_html = "<hr class='tf-divider'>"
 
-                # Links externos como HTML inline
-                lnks = item.get("links", [])
-                links_html = ""
-                if lnks:
-                    links_html = "<div class='tf-links'>"
-                    for lnk in lnks:
-                        links_html += f"<a class='tf-link' href='{lnk['url']}' target='_blank'>🔗 {lnk['titulo']}</a>"
-                    links_html += "</div>"
+                  # Links externos como HTML inline
+                  lnks = item.get("links", [])
+                  links_html = ""
+                  if lnks:
+                      links_html = "<div class='tf-links'>"
+                      for lnk in lnks:
+                          links_html += f"<a class='tf-link' href='{lnk['url']}' target='_blank'>🔗 {lnk['titulo']}</a>"
+                      links_html += "</div>"
 
-                # Questionários vinculados — label
-                qvs = item.get("questionarios_vinculados", [])
-                qv_label_html = "<div class='tf-qv-label'>Questionários vinculados</div>" if qvs else ""
+                  # Questionários vinculados — label
+                  qvs = item.get("questionarios_vinculados", [])
+                  qv_label_html = "<div class='tf-qv-label'>Questionários vinculados</div>" if qvs else ""
 
-                st.markdown(
-                    f"<div class='{card_cls}'>"
-                    f"<div class='{label_cls}'>{label_txt}</div>"
-                    f"<div class='{title_cls}'>{item['assunto_nome']}</div>"
-                    + (f"<div class='tf-desc'>{item['descricao']}</div>" if item.get('descricao') else "")
-                    + links_html
-                    + qv_label_html
-                    + f"</div>",
-                    unsafe_allow_html=True
-                )
+                  st.markdown(
+                      f"<div class='{card_cls}'>"
+                      f"<div class='{label_cls}'>{label_txt}</div>"
+                      f"<div class='{title_cls}'>{item['assunto_nome']}</div>"
+                      + (f"<div class='tf-desc'>{item['descricao']}</div>" if item.get('descricao') else "")
+                      + links_html
+                      + qv_label_html
+                      + f"</div>",
+                      unsafe_allow_html=True
+                  )
 
-                # -- Botões de ação --
-                b_feito, b_cont, b_mover, b_excluir = st.columns([2, 1, 1, 1])
-                with b_feito:
-                    if st.button(label_btn, key=f"est_mk_{item['id']}",
-                                 type="primary" if not feito else "secondary",
-                                 use_container_width=True,
-                                 help="Marcar como estudado" if not feito else "Desfazer marcação de estudado"):
-                        est_marcar_status(
-                            item["id"], novo_status,
-                            plano_id=plano_id,
-                            agendar_revisoes_auto=rev_auto,
-                            intervalos_revisao=intervalos_rev if rev_auto else []
-                        )
-                        st.rerun()
-                with b_cont:
-                    if st.button("Continuar", key=f"est_cont_btn_{item['id']}",
-                                 use_container_width=True,
-                                 help="Copiar este assunto para outro dia com anotação de onde parou"):
-                        ck = f"est_continuando_id"
-                        if st.session_state.get(ck) == item["id"]:
-                            st.session_state.pop(ck, None)
-                        else:
-                            st.session_state[ck] = item["id"]
-                            st.session_state.pop("est_realocando_id", None)
-                        st.rerun()
-                with b_mover:
-                    if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
-                                 use_container_width=True, help="Mover este item para outro dia"):
-                        if st.session_state.get("est_realocando_id") == item["id"]:
-                            st.session_state.pop("est_realocando_id", None)
-                        else:
-                            st.session_state["est_realocando_id"] = item["id"]
-                            st.session_state.pop("est_continuando_id", None)
-                        st.rerun()
-                with b_excluir:
-                    if st.button("Excluir", key=f"est_rm_{item['id']}",
-                                 use_container_width=True, help="Remover este item do planejamento"):
-                        est_remover_planejamento(item["id"])
-                        st.session_state.pop("est_realocando_id", None)
-                        st.session_state.pop("est_continuando_id", None)
-                        st.rerun()
+                  # -- Botões de ação --
+                  b_feito, b_cont, b_mover, b_excluir = st.columns([2, 1, 1, 1])
+                  with b_feito:
+                      if st.button(label_btn, key=f"est_mk_{item['id']}",
+                                   type="primary" if not feito else "secondary",
+                                   use_container_width=True,
+                                   help="Marcar como estudado" if not feito else "Desfazer marcação de estudado"):
+                          est_marcar_status(
+                              item["id"], novo_status,
+                              plano_id=plano_id,
+                              agendar_revisoes_auto=rev_auto,
+                              intervalos_revisao=intervalos_rev if rev_auto else []
+                          )
+                          st.rerun()
+                  with b_cont:
+                      if st.button("Continuar", key=f"est_cont_btn_{item['id']}",
+                                   use_container_width=True,
+                                   help="Copiar este assunto para outro dia com anotação de onde parou"):
+                          ck = f"est_continuando_id"
+                          if st.session_state.get(ck) == item["id"]:
+                              st.session_state.pop(ck, None)
+                          else:
+                              st.session_state[ck] = item["id"]
+                              st.session_state.pop("est_realocando_id", None)
+                          st.rerun()
+                  with b_mover:
+                      if st.button("Mover", key=f"est_realoc_btn_{item['id']}",
+                                   use_container_width=True, help="Mover este item para outro dia"):
+                          if st.session_state.get("est_realocando_id") == item["id"]:
+                              st.session_state.pop("est_realocando_id", None)
+                          else:
+                              st.session_state["est_realocando_id"] = item["id"]
+                              st.session_state.pop("est_continuando_id", None)
+                          st.rerun()
+                  with b_excluir:
+                      if st.button("Excluir", key=f"est_rm_{item['id']}",
+                                   use_container_width=True, help="Remover este item do planejamento"):
+                          est_remover_planejamento(item["id"])
+                          st.session_state.pop("est_realocando_id", None)
+                          st.session_state.pop("est_continuando_id", None)
+                          st.rerun()
 
-                # -- Painel mover --
-                if st.session_state.get("est_realocando_id") == item["id"]:
-                    st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
-                    rc1, rc2, rc3 = st.columns([3, 1, 1])
-                    with rc1:
-                        nova_data = st.date_input(
-                            "Mover para", value=dia_date,
-                            key=f"est_nova_data_{item['id']}", format="DD/MM/YYYY"
-                        )
-                    with rc2:
-                        st.write("")
-                        st.write("")
-                        if st.button("Confirmar", key=f"est_confirmar_realoc_{item['id']}",
-                                     type="primary", use_container_width=True, help="Confirmar a nova data"):
-                            est_realocar_assunto(item["id"], nova_data.strftime("%Y-%m-%d"))
-                            st.session_state.pop("est_realocando_id", None)
-                            st.rerun()
-                    with rc3:
-                        st.write("")
-                        st.write("")
-                        if st.button("Cancelar", key=f"est_cancelar_realoc_{item['id']}",
-                                     use_container_width=True, help="Cancelar a realocação"):
-                            st.session_state.pop("est_realocando_id", None)
-                            st.rerun()
+                  # -- Painel mover --
+                  if st.session_state.get("est_realocando_id") == item["id"]:
+                      st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
+                      rc1, rc2, rc3 = st.columns([3, 1, 1])
+                      with rc1:
+                          nova_data = st.date_input(
+                              "Mover para", value=dia_date,
+                              key=f"est_nova_data_{item['id']}", format="DD/MM/YYYY"
+                          )
+                      with rc2:
+                          st.write("")
+                          st.write("")
+                          if st.button("Confirmar", key=f"est_confirmar_realoc_{item['id']}",
+                                       type="primary", use_container_width=True, help="Confirmar a nova data"):
+                              est_realocar_assunto(item["id"], nova_data.strftime("%Y-%m-%d"))
+                              st.session_state.pop("est_realocando_id", None)
+                              st.rerun()
+                      with rc3:
+                          st.write("")
+                          st.write("")
+                          if st.button("Cancelar", key=f"est_cancelar_realoc_{item['id']}",
+                                       use_container_width=True, help="Cancelar a realocação"):
+                              st.session_state.pop("est_realocando_id", None)
+                              st.rerun()
 
-                # -- Painel continuar --
-                if st.session_state.get("est_continuando_id") == item["id"]:
-                    st.markdown("<hr style='border:none;border-top:1px solid #e8e8e8;margin:8px 0'>",
-                                unsafe_allow_html=True)
-                    st.markdown(
-                        "<div style='font-size:11px;font-weight:700;color:#8b5cf6;"
-                        "text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px'>"
-                        "↪ Continuar em outro dia</div>",
-                        unsafe_allow_html=True
-                    )
-                    cc1, cc2 = st.columns([2, 3])
-                    with cc1:
-                        cont_data = st.date_input(
-                            "Data", value=dia_date + timedelta(days=1),
-                            key=f"est_cont_data_{item['id']}", format="DD/MM/YYYY",
-                            help="Dia em que continuará o estudo deste assunto"
-                        )
-                    with cc2:
-                        cont_nota = st.text_area(
-                            "Onde parei / anotações",
-                            key=f"est_cont_nota_{item['id']}",
-                            height=68,
-                            placeholder="Ex: parei no art. 37, falta estudar incisos IV ao VIII..."
-                        )
-                    ca1, ca2 = st.columns([1, 1])
-                    with ca1:
-                        if st.button("Confirmar", key=f"est_cont_ok_{item['id']}",
-                                     type="primary", use_container_width=True,
-                                     help="Criar cópia deste assunto na data escolhida"):
-                            ok = est_continuar_assunto(
-                                plano_id, item["id"],
-                                cont_data.strftime("%Y-%m-%d"),
-                                st.session_state.get(f"est_cont_nota_{item['id']}", "")
-                            )
-                            st.session_state.pop("est_continuando_id", None)
-                            if ok:
-                                st.rerun()
-                            else:
-                                st.warning("Já existe uma continuação deste assunto nesta data.")
-                    with ca2:
-                        if st.button("Cancelar", key=f"est_cont_cancel_{item['id']}",
-                                     use_container_width=True,
-                                     help="Cancelar"):
-                            st.session_state.pop("est_continuando_id", None)
-                            st.rerun()
+                  # -- Painel continuar --
+                  if st.session_state.get("est_continuando_id") == item["id"]:
+                      st.markdown("<hr style='border:none;border-top:1px solid #e8e8e8;margin:8px 0'>",
+                                  unsafe_allow_html=True)
+                      st.markdown(
+                          "<div style='font-size:11px;font-weight:700;color:#8b5cf6;"
+                          "text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px'>"
+                          "↪ Continuar em outro dia</div>",
+                          unsafe_allow_html=True
+                      )
+                      cc1, cc2 = st.columns([2, 3])
+                      with cc1:
+                          cont_data = st.date_input(
+                              "Data", value=dia_date + timedelta(days=1),
+                              key=f"est_cont_data_{item['id']}", format="DD/MM/YYYY",
+                              help="Dia em que continuará o estudo deste assunto"
+                          )
+                      with cc2:
+                          cont_nota = st.text_area(
+                              "Onde parei / anotações",
+                              key=f"est_cont_nota_{item['id']}",
+                              height=68,
+                              placeholder="Ex: parei no art. 37, falta estudar incisos IV ao VIII..."
+                          )
+                      ca1, ca2 = st.columns([1, 1])
+                      with ca1:
+                          if st.button("Confirmar", key=f"est_cont_ok_{item['id']}",
+                                       type="primary", use_container_width=True,
+                                       help="Criar cópia deste assunto na data escolhida"):
+                              ok = est_continuar_assunto(
+                                  plano_id, item["id"],
+                                  cont_data.strftime("%Y-%m-%d"),
+                                  st.session_state.get(f"est_cont_nota_{item['id']}", "")
+                              )
+                              st.session_state.pop("est_continuando_id", None)
+                              if ok:
+                                  st.rerun()
+                              else:
+                                  st.warning("Já existe uma continuação deste assunto nesta data.")
+                      with ca2:
+                          if st.button("Cancelar", key=f"est_cont_cancel_{item['id']}",
+                                       use_container_width=True,
+                                       help="Cancelar"):
+                              st.session_state.pop("est_continuando_id", None)
+                              st.rerun()
 
-                # -- Remover links individuais --
-                if lnks:
-                    st.markdown("<div style='margin-top:2px'></div>", unsafe_allow_html=True)
-                    for li, lnk in enumerate(lnks):
-                        lc1, lc2 = st.columns([6, 1])
-                        with lc1:
-                            st.caption(f"🔗 {lnk['titulo']}")
-                        with lc2:
-                            if st.button("✕", key=f"est_rl_{item['id']}_{li}", help="Remover link"):
-                                est_remover_link(item["id"], li)
-                                st.rerun()
+                  # -- Remover links individuais --
+                  if lnks:
+                      st.markdown("<div style='margin-top:2px'></div>", unsafe_allow_html=True)
+                      for li, lnk in enumerate(lnks):
+                          lc1, lc2 = st.columns([6, 1])
+                          with lc1:
+                              st.caption(f"🔗 {lnk['titulo']}")
+                          with lc2:
+                              if st.button("✕", key=f"est_rl_{item['id']}_{li}", help="Remover link"):
+                                  est_remover_link(item["id"], li)
+                                  st.rerun()
 
-                # -- Botões dos questionários vinculados --
-                if qvs:
-                    for qv in qvs:
-                        qvc1, qvc2, qvc3 = st.columns([2, 6, 1])
-                        with qvc1:
-                            if st.button(
-                                "▶ Questões",
-                                key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
-                                use_container_width=True,
-                                help="Abrir este questionário na tela Praticar"
-                            ):
-                                st.session_state["current_qid"] = qv["questionario_id"]
-                                st.session_state["go_to"] = "Praticar"
-                                st.rerun()
-                        with qvc2:
-                            st.markdown(
-                                f"<span style='font-size:12px;color:#555;line-height:2.2'>"
-                                f"{qv['questionario_nome']}</span>",
-                                unsafe_allow_html=True
-                            )
-                        with qvc3:
-                            if st.button("✕", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
-                                         help="Desvincular"):
-                                est_desvincular_questionario(item["id"], qv["questionario_id"])
-                                st.rerun()
+                  # -- Botões dos questionários vinculados --
+                  if qvs:
+                      for qv in qvs:
+                          qvc1, qvc2, qvc3 = st.columns([2, 6, 1])
+                          with qvc1:
+                              if st.button(
+                                  "▶ Questões",
+                                  key=f"est_pratico_{item['id']}_{qv['questionario_id']}",
+                                  use_container_width=True,
+                                  help="Abrir este questionário na tela Praticar"
+                              ):
+                                  st.session_state["current_qid"] = qv["questionario_id"]
+                                  st.session_state["go_to"] = "Praticar"
+                                  st.rerun()
+                          with qvc2:
+                              st.markdown(
+                                  f"<span style='font-size:12px;color:#555;line-height:2.2'>"
+                                  f"{qv['questionario_nome']}</span>",
+                                  unsafe_allow_html=True
+                              )
+                          with qvc3:
+                              if st.button("✕", key=f"est_desvq_{item['id']}_{qv['questionario_id']}",
+                                           help="Desvincular"):
+                                  est_desvincular_questionario(item["id"], qv["questionario_id"])
+                                  st.rerun()
 
-                # -- Expanders de ação --
-                exp1, exp2 = st.columns(2)
-                with exp1:
-                    with st.expander("📝 Vincular questionário"):
-                        todos_qs = get_questionarios()
-                        qs_uteis = [q for q in todos_qs if q.get("disciplina") != "— Sistema —"]
-                        if not qs_uteis:
-                            st.caption("Nenhum questionário disponível.")
-                        else:
-                            discs_qs = sorted({(q.get("disciplina") or "Sem Disciplina")
-                                               for q in qs_uteis
-                                               if q.get("disciplina") not in ("— Sistema —", None)})
-                            disc_filt = st.selectbox(
-                                "Disciplina", ["Todas"] + discs_qs,
-                                key=f"est_qfilt_disc_{item['id']}"
-                            )
-                            qs_filtrados = qs_uteis if disc_filt == "Todas" else [
-                                q for q in qs_uteis
-                                if (q.get("disciplina") or "Sem Disciplina") == disc_filt
-                            ]
-                            busca_q = st.text_input(
-                                "Buscar", key=f"est_qbusca_{item['id']}",
-                                placeholder="Nome do questionário..."
-                            )
-                            if busca_q:
-                                qs_filtrados = [q for q in qs_filtrados
-                                                if busca_q.lower() in q["nome"].lower()]
-                            if qs_filtrados:
-                                q_opcoes = {q["id"]: q["nome"] for q in qs_filtrados}
-                                q_sel_id = st.selectbox(
-                                    "Questionário", list(q_opcoes.keys()),
-                                    format_func=lambda x: q_opcoes[x],
-                                    key=f"est_qsel_{item['id']}"
-                                )
-                                q_sel = next((q for q in qs_filtrados if q["id"] == q_sel_id), None)
-                                if st.button("Vincular", key=f"est_qvincular_{item['id']}",
-                                             type="primary", use_container_width=True,
-                                             help="Vincular o questionário selecionado a este assunto"):
-                                    if q_sel:
-                                        ok = est_vincular_questionario(
-                                            item["id"], q_sel["id"],
-                                            q_sel["nome"], q_sel.get("disciplina", "")
-                                        )
-                                        if ok:
-                                            st.success("Vinculado!")
-                                            st.rerun()
-                                        else:
-                                            st.info("Já vinculado.")
-                            else:
-                                st.caption("Nenhum questionário encontrado.")
-                with exp2:
-                    with st.expander("🔗 Adicionar link"):
-                        with st.form(key=f"est_add_link_{item['id']}"):
-                            lt = st.text_input("Título", key=f"est_lt_{item['id']}")
-                            lu = st.text_input("URL", key=f"est_lu_{item['id']}")
-                            if st.form_submit_button("Adicionar"):
-                                if lt and lu:
-                                    est_adicionar_link(item["id"], lt, lu)
-                                    st.rerun()
+                  # -- Expanders de ação --
+                  exp1, exp2 = st.columns(2)
+                  with exp1:
+                      with st.expander("📝 Vincular questionário"):
+                          todos_qs = get_questionarios()
+                          qs_uteis = [q for q in todos_qs if q.get("disciplina") != "— Sistema —"]
+                          if not qs_uteis:
+                              st.caption("Nenhum questionário disponível.")
+                          else:
+                              discs_qs = sorted({(q.get("disciplina") or "Sem Disciplina")
+                                                 for q in qs_uteis
+                                                 if q.get("disciplina") not in ("— Sistema —", None)})
+                              disc_filt = st.selectbox(
+                                  "Disciplina", ["Todas"] + discs_qs,
+                                  key=f"est_qfilt_disc_{item['id']}"
+                              )
+                              qs_filtrados = qs_uteis if disc_filt == "Todas" else [
+                                  q for q in qs_uteis
+                                  if (q.get("disciplina") or "Sem Disciplina") == disc_filt
+                              ]
+                              busca_q = st.text_input(
+                                  "Buscar", key=f"est_qbusca_{item['id']}",
+                                  placeholder="Nome do questionário..."
+                              )
+                              if busca_q:
+                                  qs_filtrados = [q for q in qs_filtrados
+                                                  if busca_q.lower() in q["nome"].lower()]
+                              if qs_filtrados:
+                                  q_opcoes = {q["id"]: q["nome"] for q in qs_filtrados}
+                                  q_sel_id = st.selectbox(
+                                      "Questionário", list(q_opcoes.keys()),
+                                      format_func=lambda x: q_opcoes[x],
+                                      key=f"est_qsel_{item['id']}"
+                                  )
+                                  q_sel = next((q for q in qs_filtrados if q["id"] == q_sel_id), None)
+                                  if st.button("Vincular", key=f"est_qvincular_{item['id']}",
+                                               type="primary", use_container_width=True,
+                                               help="Vincular o questionário selecionado a este assunto"):
+                                      if q_sel:
+                                          ok = est_vincular_questionario(
+                                              item["id"], q_sel["id"],
+                                              q_sel["nome"], q_sel.get("disciplina", "")
+                                          )
+                                          if ok:
+                                              st.success("Vinculado!")
+                                              st.rerun()
+                                          else:
+                                              st.info("Já vinculado.")
+                              else:
+                                  st.caption("Nenhum questionário encontrado.")
+                  with exp2:
+                      with st.expander("🔗 Adicionar link"):
+                          with st.form(key=f"est_add_link_{item['id']}"):
+                              lt = st.text_input("Título", key=f"est_lt_{item['id']}")
+                              lu = st.text_input("URL", key=f"est_lu_{item['id']}")
+                              if st.form_submit_button("Adicionar"):
+                                  if lt and lu:
+                                      est_adicionar_link(item["id"], lt, lu)
+                                      st.rerun()
 
-                st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
+                  st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
 
-            # -- Adicionar atividade manual --
-            with st.expander(f"➕ Atividade — {dias_semana_nomes[offset].split('-')[0]}, {dia_date.day:02d}/{dia_date.month:02d}"):
-                with st.form(key=f"est_ativ_{data_str}"):
-                    ativ_titulo = st.text_input("Título", key=f"est_ativ_titulo_{data_str}")
-                    ativ_desc   = st.text_area("Descrição (opcional)", height=50,
-                                               key=f"est_ativ_desc_{data_str}")
-                    if st.form_submit_button("Adicionar"):
-                        if ativ_titulo.strip():
-                            est_adicionar_atividade(plano_id, data_str, ativ_titulo, ativ_desc)
-                            st.rerun()
-                        else:
-                            st.warning("Informe um título.")
+              # -- Adicionar atividade manual --
+              with st.expander(f"➕ Atividade — {dias_semana_nomes[offset].split('-')[0]}, {dia_date.day:02d}/{dia_date.month:02d}"):
+                  with st.form(key=f"est_ativ_{data_str}"):
+                      ativ_titulo = st.text_input("Título", key=f"est_ativ_titulo_{data_str}")
+                      ativ_desc   = st.text_area("Descrição (opcional)", height=50,
+                                                 key=f"est_ativ_desc_{data_str}")
+                      if st.form_submit_button("Adicionar"):
+                          if ativ_titulo.strip():
+                              est_adicionar_atividade(plano_id, data_str, ativ_titulo, ativ_desc)
+                              st.rerun()
+                          else:
+                              st.warning("Informe um título.")
 
-            st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
+              st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
 
 
 
