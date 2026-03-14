@@ -2478,9 +2478,11 @@ def est_marcar_status(item_id, status, plano_id=None, agendar_revisoes_auto=Fals
         {"_id": ObjectId(item_id)},
         {"$set": {"status": status, "data_atualizacao": datetime.now(timezone.utc).isoformat()}}
     )
-    # Se marcou como estudado e revisão automática está ativa
+    # Só agenda novo ciclo se for assunto original — revisões e atividades não geram novos ciclos
     if status == "estudado" and agendar_revisoes_auto and plano_id:
-        est_agendar_revisoes(plano_id, item_id, intervalos_revisao)
+        doc = db.est_planejamento.find_one({"_id": ObjectId(item_id)}, {"tipo": 1})
+        if doc and doc.get("tipo", "assunto") == "assunto":
+            est_agendar_revisoes(plano_id, item_id, intervalos_revisao)
 
 def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
     db = get_db()
