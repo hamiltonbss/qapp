@@ -2671,6 +2671,89 @@ def fc_para_json(item_id):
     cards = fc_listar(item_id)
     return [{"id": str(c["_id"]), "frente": c["frente"], "verso": c["verso"]} for c in cards]
 
+def fc_janela_html(cards_json_str, titulo):
+    """Gera HTML completo para abrir em nova janela via window.open."""
+    import html as _html
+    titulo_safe = _html.escape(titulo)
+    return f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
+<title>Flashcards — {titulo_safe}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:#f0f4f8;display:flex;align-items:center;justify-content:center;
+     min-height:100vh;padding:20px}}
+.wrap{{width:560px;max-width:100%}}
+h2{{font-size:14px;font-weight:700;color:#19747E;text-transform:uppercase;
+    letter-spacing:.08em;margin-bottom:6px}}
+h1{{font-size:20px;font-weight:600;color:#1a1a1a;margin-bottom:24px;line-height:1.3}}
+.fc-card{{width:100%;min-height:180px;perspective:800px;cursor:pointer;margin-bottom:12px}}
+.fc-inner{{width:100%;min-height:180px;position:relative;transform-style:preserve-3d;
+           transition:transform .45s ease;border-radius:14px}}
+.fc-inner.flipped{{transform:rotateY(180deg)}}
+.fc-face{{position:absolute;width:100%;min-height:180px;backface-visibility:hidden;
+          border-radius:14px;display:flex;align-items:center;justify-content:center;
+          padding:24px;text-align:center;font-size:17px;line-height:1.6}}
+.fc-front{{background:#fff;border:2px solid #19747E;color:#1a1a1a}}
+.fc-back{{background:#f6fbf7;border:2px solid #28a745;color:#1a1a1a;transform:rotateY(180deg)}}
+.hint{{font-size:12px;color:#aaa;text-align:center;margin-bottom:16px}}
+.nav{{display:flex;align-items:center;justify-content:space-between}}
+.btn{{padding:10px 24px;border-radius:8px;border:1px solid #ddd;background:#f2f2f2;
+      cursor:pointer;font-size:14px;font-weight:600;transition:background .15s}}
+.btn:hover{{background:#e0e0e0}}
+.btn:disabled{{opacity:.35;cursor:default}}
+.btn.primary{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
+.btn.primary:hover{{background:#333}}
+.counter{{font-size:14px;color:#555;font-weight:600}}
+.empty{{text-align:center;color:#aaa;padding:40px 0;font-size:15px}}
+</style></head><body><div class='wrap'>
+<h2>Flashcards</h2>
+<h1>{titulo_safe}</h1>
+<div id='body'></div>
+</div>
+<script>
+const cards={cards_json_str};
+let idx=0;
+function render(){{
+  const b=document.getElementById('body');
+  if(!cards.length){{b.innerHTML="<div class='empty'>Nenhum flashcard.</div>";return;}}
+  const c=cards[idx];
+  b.innerHTML=`
+    <div class='fc-card' onclick='flip()'>
+      <div class='fc-inner' id='fci'>
+        <div class='fc-face fc-front'>${{c.frente}}</div>
+        <div class='fc-face fc-back'>${{c.verso}}</div>
+      </div>
+    </div>
+    <div class='hint'>Clique no card para virar</div>
+    <div class='nav'>
+      <button class='btn' onclick='prev()' ${{idx===0?'disabled':''}}>&#8592; Anterior</button>
+      <span class='counter'>${{idx+1}} / ${{cards.length}}</span>
+      <button class='btn' onclick='next()' ${{idx===cards.length-1?'disabled':''}}>Pr&oacute;ximo &#8594;</button>
+    </div>`;
+}}
+function flip(){{document.getElementById('fci').classList.toggle('flipped');}}
+function prev(){{if(idx>0){{idx--;render();}}}}
+function next(){{if(idx<cards.length-1){{idx++;render();}}}}
+render();
+</script></body></html>"""
+
+def fc_abrir_componente(item_id, titulo, key_suffix=""):
+    """Renderiza componente HTML que abre os flashcards em nova janela via data URL."""
+    import json as _json
+    import base64
+    import streamlit.components.v1 as _components
+    cards = fc_para_json(item_id)
+    if not cards:
+        return False
+    cards_json = _json.dumps(cards, ensure_ascii=False)
+    html_content = fc_janela_html(cards_json, titulo)
+    b64 = base64.b64encode(html_content.encode("utf-8")).decode("ascii")
+    data_url = f"data:text/html;base64,{b64}"
+    opener = f"""<script>window.open('{data_url}','_blank','width=640,height=580,scrollbars=yes,resizable=yes');</script>"""
+    _components.html(opener, height=0)
+    return True
+
+
 
 def est_adicionar_link(item_id, titulo, url):
     db = get_db()
@@ -2891,10 +2974,8 @@ def _page_progresso_plano(plano_id, plano_nome):
                     if n_fc_rev > 0:
                         if st.button(f"🃏 {n_fc_rev} cards", key=f"fc_rev_{a['item_id']}",
                                      use_container_width=True,
-                                     help="Estudar flashcards deste assunto"):
-                            st.session_state["fc_popup_item_id"] = a["item_id"]
-                            st.session_state["go_to"] = "Plano de Estudos"
-                            st.rerun()
+                                     help="Estudar flashcards deste assunto em nova janela"):
+                            fc_abrir_componente(a["item_id"], a["assunto_nome"], key_suffix="_rev")
 
     # ── Tab 3: Próximas revisões agendadas ───────────────────────────────────
     with tab3:
@@ -3405,21 +3486,21 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                   qvs = item.get("questionarios_vinculados", [])
                   qv_label_html = "<div class='tf-qv-label'>Questionários vinculados</div>" if qvs else ""
 
-                  # Flashcards — badge no card
+                  # Flashcards — link abaixo do título
                   n_fc = item.get("n_flashcards", 0)
-                  fc_html = (
-                      f"<div class='tf-links'>"
-                      f"<span style='font-size:12px;color:#f59e0b'>🃏 {n_fc} flashcard(s)</span>"
-                      f"</div>"
+                  fc_link_html = (
+                      f"<div style='margin:4px 0 2px 0'>"
+                      f"<span style='font-size:12px;color:#f59e0b;font-weight:600'>"
+                      f"🃏 {n_fc} flashcard(s)</span></div>"
                   ) if n_fc > 0 else ""
 
                   st.markdown(
                       f"<div class='{card_cls}'>"
                       f"<div class='{label_cls}'>{label_txt}</div>"
                       f"<div class='{title_cls}'>{item['assunto_nome']}</div>"
+                      + fc_link_html
                       + (f"<div class='tf-desc'>{item['descricao']}</div>" if item.get('descricao') else "")
                       + links_html
-                      + fc_html
                       + qv_label_html
                       + f"</div>",
                       unsafe_allow_html=True
@@ -3576,82 +3657,7 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                                   est_desvincular_questionario(item["id"], qv["questionario_id"])
                                   st.rerun()
 
-                  # -- Popup flashcards --
-                  if st.session_state.get("fc_popup_item_id") == item["id"]:
-                      cards = fc_para_json(item["id"])
-                      import json as _json
-                      cards_json = _json.dumps(cards, ensure_ascii=False)
-                      popup_html = f"""
-<style>
-  .fc-overlay{{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.45);
-               z-index:9999;display:flex;align-items:center;justify-content:center}}
-  .fc-modal{{background:#fff;border-radius:16px;padding:32px 36px;width:520px;max-width:95vw;
-             box-shadow:0 8px 40px rgba(0,0,0,.18);position:relative}}
-  .fc-close{{position:absolute;top:14px;right:18px;font-size:20px;cursor:pointer;color:#aaa;border:none;background:none}}
-  .fc-card{{width:100%;min-height:160px;perspective:600px;cursor:pointer;margin:20px 0}}
-  .fc-inner{{width:100%;min-height:160px;position:relative;transform-style:preserve-3d;
-             transition:transform .5s;border-radius:12px}}
-  .fc-inner.flipped{{transform:rotateY(180deg)}}
-  .fc-face{{position:absolute;width:100%;min-height:160px;backface-visibility:hidden;
-            border-radius:12px;display:flex;align-items:center;justify-content:center;
-            padding:20px;text-align:center;font-size:16px;line-height:1.5}}
-  .fc-front{{background:#f0f9ff;border:2px solid #19747E;color:#1a1a1a}}
-  .fc-back{{background:#f6fbf7;border:2px solid #28a745;color:#1a1a1a;transform:rotateY(180deg)}}
-  .fc-nav{{display:flex;align-items:center;justify-content:space-between;margin-top:8px}}
-  .fc-btn{{padding:8px 20px;border-radius:8px;border:1px solid #ddd;background:#f8f8f8;
-           cursor:pointer;font-size:14px;font-weight:600}}
-  .fc-btn.primary{{background:#1a1a1a;color:#fff;border-color:#1a1a1a}}
-  .fc-hint{{font-size:12px;color:#aaa;text-align:center;margin-top:4px}}
-  .fc-counter{{font-size:13px;color:#666;font-weight:600}}
-  .fc-empty{{text-align:center;color:#aaa;padding:30px 0}}
-</style>
-<div class="fc-overlay" id="fcOverlay">
-  <div class="fc-modal">
-    <button class="fc-close" onclick="document.getElementById('fcOverlay').style.display='none'">✕</button>
-    <div style="font-size:11px;font-weight:700;color:#19747E;text-transform:uppercase;
-                letter-spacing:.08em;margin-bottom:4px">Flashcards</div>
-    <div style="font-size:17px;font-weight:600;color:#1a1a1a;margin-bottom:16px">
-      {item['assunto_nome']}
-    </div>
-    <div id="fcBody"></div>
-  </div>
-</div>
-<script>
-const cards = {cards_json};
-let idx = 0;
-function render() {{
-  const body = document.getElementById('fcBody');
-  if (!cards.length) {{
-    body.innerHTML = '<div class="fc-empty">Nenhum flashcard ainda.</div>';
-    return;
-  }}
-  const c = cards[idx];
-  body.innerHTML = `
-    <div class="fc-card" onclick="flip()">
-      <div class="fc-inner" id="fcInner">
-        <div class="fc-face fc-front">${{c.frente}}</div>
-        <div class="fc-face fc-back">${{c.verso}}</div>
-      </div>
-    </div>
-    <div class="fc-hint">Clique no card para virar</div>
-    <div class="fc-nav">
-      <button class="fc-btn" onclick="prev()" ${{idx===0?'disabled':''}}>&larr; Anterior</button>
-      <span class="fc-counter">${{idx+1}} / ${{cards.length}}</span>
-      <button class="fc-btn" onclick="next()" ${{idx===cards.length-1?'disabled':''}}>Próximo &rarr;</button>
-    </div>`;
-}}
-function flip() {{
-  document.getElementById('fcInner').classList.toggle('flipped');
-}}
-function prev() {{ if(idx>0){{idx--;render();}} }}
-function next() {{ if(idx<cards.length-1){{idx++;render();}} }}
-render();
-</script>"""
-                      import streamlit.components.v1 as _components
-                      _components.html(popup_html, height=420)
-                      if st.button("Fechar flashcards", key=f"fc_fechar_{item['id']}"):
-                          st.session_state.pop("fc_popup_item_id", None)
-                          st.rerun()
+
 
                   # -- Expanders de ação --
                   exp1, exp2, exp3 = st.columns(3)
@@ -3707,26 +3713,11 @@ render();
                       with st.expander("🃏 Flashcards"):
                           cards_existentes = fc_listar(item["id"])
                           if cards_existentes:
-                              st.caption(f"{len(cards_existentes)} card(s)")
-                              for fc in cards_existentes:
-                                  fc1, fc2 = st.columns([8, 1])
-                                  with fc1:
-                                      st.markdown(
-                                          f"<div style='font-size:12px;padding:4px 0;"
-                                          f"border-bottom:1px solid #f0f0f0'>"
-                                          f"<b>P:</b> {fc['frente']}</div>",
-                                          unsafe_allow_html=True
-                                      )
-                                  with fc2:
-                                      if st.button("✕", key=f"fc_del_{str(fc['_id'])}",
-                                                   help="Excluir flashcard"):
-                                          fc_excluir(str(fc["_id"]))
-                                          st.rerun()
-                              if st.button("🃏 Estudar flashcards", key=f"fc_abrir_{item['id']}",
+                              st.caption(f"{len(cards_existentes)} card(s) cadastrado(s)")
+                              if st.button("🃏 Estudar em nova janela", key=f"fc_abrir_{item['id']}",
                                            use_container_width=True, type="primary",
-                                           help="Abrir popup para estudar os flashcards"):
-                                  st.session_state["fc_popup_item_id"] = item["id"]
-                                  st.rerun()
+                                           help="Abrir flashcards em nova janela"):
+                                  fc_abrir_componente(item["id"], item["assunto_nome"])
                               st.divider()
                           with st.form(key=f"fc_add_{item['id']}"):
                               st.caption("Cole um card por linha: **pergunta ; resposta**")
