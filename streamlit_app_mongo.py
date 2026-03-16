@@ -3004,55 +3004,72 @@ def _page_progresso_plano(plano_id, plano_nome):
                         )
                 st.markdown(rows_html, unsafe_allow_html=True)
 
-    # ── Tab 2: Guia de revisão (estudados, mais antigos primeiro) ────────────
+    # ── Tab 2: Guia de revisão agrupado por disciplina ──────────────────────
     with tab2:
         if not estudados:
             st.info("Nenhum assunto marcado como estudado ainda.")
         else:
-            st.caption(
-                f"{len(estudados)} assunto(s) estudados — ordenados do mais antigo ao mais recente. "
-                "Os primeiros são os candidatos prioritários para revisão."
-            )
             hoje = date.today()
+            # Agrupar por disciplina mantendo ordem (mais antigo primeiro dentro de cada)
+            rev_por_disc = {}
             for a in estudados:
-                dt_raw = a["data_atualizacao"][:10] if a["data_atualizacao"] else a["data"]
-                try:
-                    dt_obj = date.fromisoformat(dt_raw)
-                    dias_atras = (hoje - dt_obj).days
-                    dt_fmt = dt_obj.strftime("%d/%m/%Y")
-                    urgencia = (
-                        "🔴" if dias_atras >= 30 else
-                        "🟡" if dias_atras >= 7  else
-                        "🟢"
-                    )
-                    tempo_label = f"{dias_atras}d atrás"
-                except Exception:
-                    dt_fmt = dt_raw
-                    urgencia = "⚪"
-                    tempo_label = ""
+                disc = a["disciplina_nome"] or "(Sem disciplina)"
+                rev_por_disc.setdefault(disc, []).append(a)
 
-                rc1, rc2 = st.columns([8, 2])
-                with rc1:
-                    st.markdown(
-                        f"<div class='rev-card'>"
-                        f"<span style='font-size:11px;font-weight:700;color:#19747E;"
-                        f"text-transform:uppercase;letter-spacing:.07em'>{a['disciplina_nome']}</span><br>"
-                        f"{urgencia} {a['assunto_nome']}"
-                        f"<span class='rev-date' style='float:right'>{dt_fmt} · {tempo_label}</span>"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
-                with rc2:
-                    n_fc_rev = a.get("n_flashcards", 0)
-                    if n_fc_rev > 0:
-                        _fc_rev_key = f"fc_vis_rev_{a['item_id']}"
-                        if st.button(f"🃏 {n_fc_rev} cards", key=f"fc_rev_{a['item_id']}",
-                                     use_container_width=True,
-                                     help="Estudar flashcards"):
-                            st.session_state[_fc_rev_key] = not st.session_state.get(_fc_rev_key, False)
-                            st.rerun()
-                if n_fc_rev > 0 and st.session_state.get(f"fc_vis_rev_{a['item_id']}"):
-                    fc_abrir_componente(a["item_id"], a["assunto_nome"])
+            st.caption(
+                f"{len(estudados)} assunto(s) estudados em {len(rev_por_disc)} disciplina(s) "
+                "— ordenados do mais antigo ao mais recente dentro de cada disciplina."
+            )
+
+            for disc_nome, assuntos_disc in sorted(rev_por_disc.items()):
+                n_disc = len(assuntos_disc)
+                # Calcular urgência geral da disciplina
+                max_dias = 0
+                for a in assuntos_disc:
+                    dt_raw = a["data_atualizacao"][:10] if a["data_atualizacao"] else a["data"]
+                    try:
+                        max_dias = max(max_dias, (hoje - date.fromisoformat(dt_raw)).days)
+                    except Exception:
+                        pass
+                urg_disc = "🔴" if max_dias >= 30 else ("🟡" if max_dias >= 7 else "🟢")
+
+                with st.expander(f"{urg_disc} {disc_nome}  —  {n_disc} assunto(s)", expanded=False):
+                    for a in assuntos_disc:
+                        dt_raw = a["data_atualizacao"][:10] if a["data_atualizacao"] else a["data"]
+                        try:
+                            dt_obj = date.fromisoformat(dt_raw)
+                            dias_atras = (hoje - dt_obj).days
+                            dt_fmt = dt_obj.strftime("%d/%m/%Y")
+                            urgencia = (
+                                "🔴" if dias_atras >= 30 else
+                                "🟡" if dias_atras >= 7  else
+                                "🟢"
+                            )
+                            tempo_label = f"{dias_atras}d atrás"
+                        except Exception:
+                            dt_fmt = dt_raw
+                            urgencia = "⚪"
+                            tempo_label = ""
+
+                        n_fc_rev = a.get("n_flashcards", 0)
+                        rc1, rc2 = st.columns([8, 2])
+                        with rc1:
+                            st.markdown(
+                                f"<div class='rev-card'>"
+                                f"{urgencia} {a['assunto_nome']}"
+                                f"<span class='rev-date' style='float:right'>{dt_fmt} · {tempo_label}</span>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+                        with rc2:
+                            if n_fc_rev > 0:
+                                _fc_rev_key = f"fc_vis_rev_{a['item_id']}"
+                                if st.button(f"🃏 {n_fc_rev} cards", key=f"fc_rev_{a['item_id']}",
+                                             use_container_width=True, help="Estudar flashcards"):
+                                    st.session_state[_fc_rev_key] = not st.session_state.get(_fc_rev_key, False)
+                                    st.rerun()
+                        if n_fc_rev > 0 and st.session_state.get(f"fc_vis_rev_{a['item_id']}"):
+                            fc_abrir_componente(a["item_id"], a["assunto_nome"])
 
     # ── Tab 3: Próximas revisões agendadas ───────────────────────────────────
     with tab3:
@@ -3791,12 +3808,6 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                           cards_existentes = fc_listar(item["id"])
                           if cards_existentes:
                               st.caption(f"{len(cards_existentes)} card(s) cadastrado(s)")
-                              _fc_vis_key = f"fc_vis_{item['id']}"
-                              if st.button("🃏 Estudar flashcards", key=f"fc_abrir_{item['id']}",
-                                           use_container_width=True, type="primary",
-                                           help="Abrir flashcards aqui"):
-                                  st.session_state[_fc_vis_key] = not st.session_state.get(_fc_vis_key, False)
-                                  st.rerun()
                               st.divider()
                           with st.form(key=f"fc_add_{item['id']}"):
                               st.caption("Cole um card por linha: **pergunta ; resposta**")
@@ -3839,8 +3850,8 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                   st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
 
                   # -- Flashcards em largura total (dentro do for, fora do container) --
-                  _fc_vis_key = f"fc_vis_{item['id']}"
-                  if st.session_state.get(_fc_vis_key):
+                  # Flashcards abertos automaticamente se existirem
+                  if item.get("n_flashcards", 0) > 0:
                       fc_abrir_componente(item["id"], item["assunto_nome"])
 
               # -- Adicionar atividade manual --
