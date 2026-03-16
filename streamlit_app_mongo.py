@@ -3729,16 +3729,33 @@ render();
                                   st.rerun()
                               st.divider()
                           with st.form(key=f"fc_add_{item['id']}"):
-                              fc_frente = st.text_area("Pergunta (frente)", height=68,
-                                                        key=f"fc_frente_{item['id']}")
-                              fc_verso  = st.text_area("Resposta (verso)",  height=68,
-                                                        key=f"fc_verso_{item['id']}")
-                              if st.form_submit_button("Adicionar card"):
-                                  if fc_frente.strip() and fc_verso.strip():
-                                      fc_adicionar(item["id"], fc_frente, fc_verso)
+                              st.caption("Cole um card por linha: **pergunta ; resposta**")
+                              fc_lote = st.text_area(
+                                  "Cards (um por linha)",
+                                  height=120,
+                                  key=f"fc_lote_{item['id']}",
+                                  placeholder="Qual o conceito de X? ; Resposta aqui..."
+                              )
+                              if st.form_submit_button("Adicionar cards"):
+                                  linhas = [l.strip() for l in fc_lote.splitlines() if l.strip()]
+                                  ok_count, err_count = 0, 0
+                                  for linha in linhas:
+                                      if ";" in linha:
+                                          partes = linha.split(";", 1)
+                                          frente = partes[0].strip()
+                                          verso  = partes[1].strip()
+                                          if frente and verso:
+                                              fc_adicionar(item["id"], frente, verso)
+                                              ok_count += 1
+                                          else:
+                                              err_count += 1
+                                      else:
+                                          err_count += 1
+                                  if ok_count:
+                                      st.success(f"{ok_count} card(s) adicionado(s).")
                                       st.rerun()
-                                  else:
-                                      st.warning("Preencha pergunta e resposta.")
+                                  if err_count:
+                                      st.warning(f"{err_count} linha(s) ignorada(s) — use o formato: pergunta ; resposta")
                   with exp3:
                       with st.expander("🔗 Adicionar link"):
                           with st.form(key=f"est_add_link_{item['id']}"):
