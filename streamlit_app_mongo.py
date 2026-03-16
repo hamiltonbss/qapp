@@ -2823,7 +2823,7 @@ function prev(){{if(idx>0){{idx--;render();}}}}
 function next(){{if(idx<cards.length-1){{idx++;render();}}}}
 render();
 </script></body></html>"""
-    _components.html(component_html, height=380, scrolling=False)
+    _components.html(component_html, height=440, scrolling=False)
     return True
 
 
@@ -3051,8 +3051,8 @@ def _page_progresso_plano(plano_id, plano_nome):
                                      help="Estudar flashcards"):
                             st.session_state[_fc_rev_key] = not st.session_state.get(_fc_rev_key, False)
                             st.rerun()
-                        if st.session_state.get(_fc_rev_key):
-                            fc_abrir_componente(a["item_id"], a["assunto_nome"])
+                if n_fc_rev > 0 and st.session_state.get(f"fc_vis_rev_{a['item_id']}"):
+                    fc_abrir_componente(a["item_id"], a["assunto_nome"])
 
     # ── Tab 3: Próximas revisões agendadas ───────────────────────────────────
     with tab3:
@@ -3797,8 +3797,6 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                                            help="Abrir flashcards aqui"):
                                   st.session_state[_fc_vis_key] = not st.session_state.get(_fc_vis_key, False)
                                   st.rerun()
-                              if st.session_state.get(_fc_vis_key):
-                                  fc_abrir_componente(item["id"], item["assunto_nome"])
                               st.divider()
                           with st.form(key=f"fc_add_{item['id']}"):
                               st.caption("Cole um card por linha: **pergunta ; resposta**")
@@ -3839,6 +3837,11 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                                       st.rerun()
 
                   st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
+
+                  # -- Flashcards em largura total (fora das colunas) --
+                  _fc_vis_key = f"fc_vis_{item['id']}"
+                  if st.session_state.get(_fc_vis_key):
+                      fc_abrir_componente(item["id"], item["assunto_nome"])
 
               # -- Adicionar atividade manual --
               with st.expander(f"➕ Atividade — {dias_semana_nomes[offset].split('-')[0]}, {dia_date.day:02d}/{dia_date.month:02d}"):
