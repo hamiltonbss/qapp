@@ -2567,22 +2567,33 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
             "disciplina_id": str(d.get("disciplina_id", "")) if d.get("disciplina_id") else "",
             "questionarios_vinculados": d.get("questionarios_vinculados", []),
             "continuacao_de": d.get("continuacao_de", None),
+            "revisao_origem_id": str(d["revisao_origem_id"]) if d.get("revisao_origem_id") else None,
             "n_flashcards": 0,  # preenchido abaixo se houver
         })
-    # Enriquecer com contagem de flashcards (suporta item_id como string ou ObjectId)
+    # Enriquecer com contagem de flashcards
+    # Para revisões, usar revisao_origem_id como chave de busca
     todos_ids = [item["id"] for itens in por_data.values() for item in itens]
-    if todos_ids:
+    # IDs para busca: próprio id + origem das revisões
+    ids_busca = set(todos_ids)
+    for itens in por_data.values():
+        for item in itens:
+            if item.get("revisao_origem_id"):
+                ids_busca.add(item["revisao_origem_id"])
+    ids_busca = list(ids_busca)
+    if ids_busca:
         oids = []
-        for i in todos_ids:
+        for i in ids_busca:
             try: oids.append(ObjectId(i))
             except Exception: pass
         fc_counts = {}
-        for fc in db.flashcards.find({"item_id": {"$in": todos_ids + oids}}):
+        for fc in db.flashcards.find({"item_id": {"$in": ids_busca + oids}}):
             key = str(fc["item_id"])
             fc_counts[key] = fc_counts.get(key, 0) + 1
         for itens in por_data.values():
             for item in itens:
-                item["n_flashcards"] = fc_counts.get(item["id"], 0)
+                # Revisões herdam flashcards do item original
+                lookup_id = item.get("revisao_origem_id") or item["id"]
+                item["n_flashcards"] = fc_counts.get(lookup_id, 0)
     return por_data
 
 def est_calcular_distribuicao(n_assuntos, data_inicio, dias_semana_ativos,
@@ -3851,8 +3862,10 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
 
                   # -- Flashcards em largura total (dentro do for, fora do container) --
                   # Flashcards abertos automaticamente se existirem
+                  # Revisões usam o item original como fonte dos flashcards
                   if item.get("n_flashcards", 0) > 0:
-                      fc_abrir_componente(item["id"], item["assunto_nome"])
+                      _fc_src_id = item.get("revisao_origem_id") or item["id"]
+                      fc_abrir_componente(_fc_src_id, item["assunto_nome"])
 
               # -- Adicionar atividade manual --
               with st.expander(f"➕ Atividade — {dias_semana_nomes[offset].split('-')[0]}, {dia_date.day:02d}/{dia_date.month:02d}"):
