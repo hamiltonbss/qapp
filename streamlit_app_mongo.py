@@ -2291,12 +2291,17 @@ def est_progresso_plano(plano_id):
     # Revisões feitas ordenadas por data desc
     revisoes_feitas.sort(key=lambda x: x["data"], reverse=True)
 
-    # Enriquecer flashcard count nos assuntos estudados
+    # Enriquecer flashcard count nos assuntos estudados (suporta item_id string ou ObjectId)
     if assuntos_estudados:
         ids_est = [a["item_id"] for a in assuntos_estudados]
+        oids_est = []
+        for i in ids_est:
+            try: oids_est.append(ObjectId(i))
+            except Exception: pass
         fc_counts = {}
-        for fc in db.flashcards.find({"item_id": {"$in": ids_est}}):
-            fc_counts[fc["item_id"]] = fc_counts.get(fc["item_id"], 0) + 1
+        for fc in db.flashcards.find({"item_id": {"$in": ids_est + oids_est}}):
+            key = str(fc["item_id"])
+            fc_counts[key] = fc_counts.get(key, 0) + 1
         for a in assuntos_estudados:
             a["n_flashcards"] = fc_counts.get(a["item_id"], 0)
 
@@ -2564,12 +2569,17 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
             "continuacao_de": d.get("continuacao_de", None),
             "n_flashcards": 0,  # preenchido abaixo se houver
         })
-    # Enriquecer com contagem de flashcards
+    # Enriquecer com contagem de flashcards (suporta item_id como string ou ObjectId)
     todos_ids = [item["id"] for itens in por_data.values() for item in itens]
     if todos_ids:
+        oids = []
+        for i in todos_ids:
+            try: oids.append(ObjectId(i))
+            except Exception: pass
         fc_counts = {}
-        for fc in db.flashcards.find({"item_id": {"$in": todos_ids}}):
-            fc_counts[fc["item_id"]] = fc_counts.get(fc["item_id"], 0) + 1
+        for fc in db.flashcards.find({"item_id": {"$in": todos_ids + oids}}):
+            key = str(fc["item_id"])
+            fc_counts[key] = fc_counts.get(key, 0) + 1
         for itens in por_data.values():
             for item in itens:
                 item["n_flashcards"] = fc_counts.get(item["id"], 0)
@@ -2640,18 +2650,26 @@ def est_distribuir_disciplina(plano_id, disc_id, disc_nome, data_inicio,
 
     return alocados, ja_existiam
 
+def _fc_query(item_id):
+    """Busca por item_id como string OU ObjectId para compatibilidade com dados antigos."""
+    try:
+        return {"item_id": {"$in": [item_id, ObjectId(item_id)]}}
+    except Exception:
+        return {"item_id": item_id}
+
 def fc_listar(item_id):
     """Lista flashcards de um item do planejamento."""
     db = get_db()
-    return list(db.flashcards.find({"item_id": item_id}).sort("ordem", ASCENDING))
+    return list(db.flashcards.find(_fc_query(item_id)).sort("ordem", ASCENDING))
 
 def fc_adicionar(item_id, frente, verso):
-    """Adiciona um flashcard ao item."""
+    """Adiciona um flashcard ao item. Sempre salva item_id como string."""
     db = get_db()
-    ultimo = db.flashcards.find_one({"item_id": item_id}, sort=[("ordem", DESCENDING)])
+    item_id_str = str(item_id)
+    ultimo = db.flashcards.find_one(_fc_query(item_id_str), sort=[("ordem", DESCENDING)])
     ordem = (ultimo["ordem"] + 1) if ultimo and "ordem" in ultimo else 0
     db.flashcards.insert_one({
-        "item_id": item_id,
+        "item_id": item_id_str,
         "frente": frente.strip(),
         "verso": verso.strip(),
         "ordem": ordem,
@@ -2664,7 +2682,7 @@ def fc_excluir(fc_id):
 
 def fc_excluir_todos(item_id):
     db = get_db()
-    db.flashcards.delete_many({"item_id": item_id})
+    db.flashcards.delete_many(_fc_query(item_id))
 
 def fc_para_json(item_id):
     """Retorna lista de dicts {frente, verso, id} para passar ao popup."""
