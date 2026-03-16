@@ -3838,10 +3838,10 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
 
                   st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
 
-              # -- Flashcards em largura total (fora do container do card) --
-              _fc_vis_key = f"fc_vis_{item['id']}"
-              if st.session_state.get(_fc_vis_key):
-                  fc_abrir_componente(item["id"], item["assunto_nome"])
+                  # -- Flashcards em largura total (dentro do for, fora do container) --
+                  _fc_vis_key = f"fc_vis_{item['id']}"
+                  if st.session_state.get(_fc_vis_key):
+                      fc_abrir_componente(item["id"], item["assunto_nome"])
 
               # -- Adicionar atividade manual --
               with st.expander(f"➕ Atividade — {dias_semana_nomes[offset].split('-')[0]}, {dia_date.day:02d}/{dia_date.month:02d}"):
@@ -3909,4 +3909,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
