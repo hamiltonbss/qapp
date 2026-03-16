@@ -1,4 +1,4 @@
-import os
+limport os
 import random
 import calendar
 from datetime import datetime, timezone, date
@@ -3866,19 +3866,6 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                   if item.get("n_flashcards", 0) > 0:
                       _fc_src_id = item.get("revisao_origem_id") or item["id"]
                       fc_abrir_componente(_fc_src_id, item["assunto_nome"])
-
-              # -- Adicionar atividade manual --
-              with st.expander(f"➕ Atividade — {dias_semana_nomes[offset].split('-')[0]}, {dia_date.day:02d}/{dia_date.month:02d}"):
-                  with st.form(key=f"est_ativ_{data_str}"):
-                      ativ_titulo = st.text_input("Título", key=f"est_ativ_titulo_{data_str}")
-                      ativ_desc   = st.text_area("Descrição (opcional)", height=50,
-                                                 key=f"est_ativ_desc_{data_str}")
-                      if st.form_submit_button("Adicionar"):
-                          if ativ_titulo.strip():
-                              est_adicionar_atividade(plano_id, data_str, ativ_titulo, ativ_desc)
-                              st.rerun()
-                          else:
-                              st.warning("Informe um título.")
 
               st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
 
