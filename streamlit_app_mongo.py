@@ -2756,19 +2756,74 @@ render();
 </script></body></html>"""
 
 def fc_abrir_componente(item_id, titulo, key_suffix=""):
-    """Renderiza componente HTML que abre os flashcards em nova janela via data URL."""
+    """Renderiza os flashcards inline como componente HTML estilizado em janela flutuante."""
     import json as _json
-    import base64
     import streamlit.components.v1 as _components
     cards = fc_para_json(item_id)
     if not cards:
         return False
     cards_json = _json.dumps(cards, ensure_ascii=False)
-    html_content = fc_janela_html(cards_json, titulo)
-    b64 = base64.b64encode(html_content.encode("utf-8")).decode("ascii")
-    data_url = f"data:text/html;base64,{b64}"
-    opener = f"""<script>window.open('{data_url}','_blank','width=640,height=580,scrollbars=yes,resizable=yes');</script>"""
-    _components.html(opener, height=0)
+    import html as _html
+    titulo_safe = _html.escape(titulo)
+    component_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:#f0f4f8;padding:16px;min-height:100%}}
+.wrap{{background:#fff;border-radius:14px;padding:24px 28px;
+       box-shadow:0 4px 24px rgba(0,0,0,.12)}}
+.label{{font-size:11px;font-weight:700;color:#19747E;text-transform:uppercase;
+        letter-spacing:.08em;margin-bottom:4px}}
+.titulo{{font-size:17px;font-weight:600;color:#1a1a1a;margin-bottom:20px;line-height:1.3}}
+.fc-card{{width:100%;min-height:160px;perspective:800px;cursor:pointer;margin-bottom:8px}}
+.fc-inner{{width:100%;min-height:160px;position:relative;transform-style:preserve-3d;
+           transition:transform .4s ease;border-radius:12px}}
+.fc-inner.flipped{{transform:rotateY(180deg)}}
+.fc-face{{position:absolute;width:100%;min-height:160px;backface-visibility:hidden;
+          border-radius:12px;display:flex;align-items:center;justify-content:center;
+          padding:20px;text-align:center;font-size:15px;line-height:1.6}}
+.fc-front{{background:#f0f9ff;border:2px solid #19747E;color:#1a1a1a}}
+.fc-back{{background:#f6fbf7;border:2px solid #28a745;color:#1a1a1a;
+          transform:rotateY(180deg)}}
+.hint{{font-size:11px;color:#aaa;text-align:center;margin-bottom:14px}}
+.nav{{display:flex;align-items:center;justify-content:space-between;margin-top:4px}}
+.btn{{padding:8px 20px;border-radius:8px;border:1px solid #ddd;background:#f2f2f2;
+      cursor:pointer;font-size:13px;font-weight:600}}
+.btn:hover:not(:disabled){{background:#e0e0e0}}
+.btn:disabled{{opacity:.3;cursor:default}}
+.counter{{font-size:13px;color:#555;font-weight:600}}
+</style></head><body><div class='wrap'>
+<div class='label'>Flashcards</div>
+<div class='titulo'>{titulo_safe}</div>
+<div id='body'></div>
+</div>
+<script>
+const cards={cards_json};
+let idx=0;
+function render(){{
+  const b=document.getElementById('body');
+  if(!cards.length){{b.innerHTML="<p style='color:#aaa;text-align:center;padding:30px'>Sem cards.</p>";return;}}
+  const c=cards[idx];
+  b.innerHTML=`
+    <div class='fc-card' onclick='flip()'>
+      <div class='fc-inner' id='fci'>
+        <div class='fc-face fc-front'>${{c.frente}}</div>
+        <div class='fc-face fc-back'>${{c.verso}}</div>
+      </div>
+    </div>
+    <div class='hint'>Clique no card para virar</div>
+    <div class='nav'>
+      <button class='btn' ${{idx===0?'disabled':''}} onclick='prev()'>&#8592; Anterior</button>
+      <span class='counter'>${{idx+1}} / ${{cards.length}}</span>
+      <button class='btn' ${{idx===cards.length-1?'disabled':''}} onclick='next()'>Pr&#243;ximo &#8594;</button>
+    </div>`;
+}}
+function flip(){{document.getElementById('fci').classList.toggle('flipped');}}
+function prev(){{if(idx>0){{idx--;render();}}}}
+function next(){{if(idx<cards.length-1){{idx++;render();}}}}
+render();
+</script></body></html>"""
+    _components.html(component_html, height=380, scrolling=False)
     return True
 
 
@@ -2990,10 +3045,14 @@ def _page_progresso_plano(plano_id, plano_nome):
                 with rc2:
                     n_fc_rev = a.get("n_flashcards", 0)
                     if n_fc_rev > 0:
+                        _fc_rev_key = f"fc_vis_rev_{a['item_id']}"
                         if st.button(f"🃏 {n_fc_rev} cards", key=f"fc_rev_{a['item_id']}",
                                      use_container_width=True,
-                                     help="Estudar flashcards deste assunto em nova janela"):
-                            fc_abrir_componente(a["item_id"], a["assunto_nome"], key_suffix="_rev")
+                                     help="Estudar flashcards"):
+                            st.session_state[_fc_rev_key] = not st.session_state.get(_fc_rev_key, False)
+                            st.rerun()
+                        if st.session_state.get(_fc_rev_key):
+                            fc_abrir_componente(a["item_id"], a["assunto_nome"])
 
     # ── Tab 3: Próximas revisões agendadas ───────────────────────────────────
     with tab3:
@@ -3732,9 +3791,13 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                           cards_existentes = fc_listar(item["id"])
                           if cards_existentes:
                               st.caption(f"{len(cards_existentes)} card(s) cadastrado(s)")
-                              if st.button("🃏 Estudar em nova janela", key=f"fc_abrir_{item['id']}",
+                              _fc_vis_key = f"fc_vis_{item['id']}"
+                              if st.button("🃏 Estudar flashcards", key=f"fc_abrir_{item['id']}",
                                            use_container_width=True, type="primary",
-                                           help="Abrir flashcards em nova janela"):
+                                           help="Abrir flashcards aqui"):
+                                  st.session_state[_fc_vis_key] = not st.session_state.get(_fc_vis_key, False)
+                                  st.rerun()
+                              if st.session_state.get(_fc_vis_key):
                                   fc_abrir_componente(item["id"], item["assunto_nome"])
                               st.divider()
                           with st.form(key=f"fc_add_{item['id']}"):
