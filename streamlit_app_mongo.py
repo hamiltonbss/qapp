@@ -2571,9 +2571,8 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
             "n_flashcards": 0,  # preenchido abaixo se houver
         })
     # Enriquecer com contagem de flashcards
-    # Para revisões, usar revisao_origem_id como chave de busca
+    # Busca flashcards pelo próprio id E pelo revisao_origem_id (quando existir)
     todos_ids = [item["id"] for itens in por_data.values() for item in itens]
-    # IDs para busca: próprio id + origem das revisões
     ids_busca = set(todos_ids)
     for itens in por_data.values():
         for item in itens:
@@ -2591,9 +2590,10 @@ def est_buscar_planejamento_periodo(plano_id, data_inicio, data_fim):
             fc_counts[key] = fc_counts.get(key, 0) + 1
         for itens in por_data.values():
             for item in itens:
-                # Revisões herdam flashcards do item original
-                lookup_id = item.get("revisao_origem_id") or item["id"]
-                item["n_flashcards"] = fc_counts.get(lookup_id, 0)
+                # Conta próprios flashcards + flashcards herdados do original
+                n_proprios = fc_counts.get(item["id"], 0)
+                n_origem   = fc_counts.get(item.get("revisao_origem_id", ""), 0)
+                item["n_flashcards"] = n_proprios + n_origem
     return por_data
 
 def est_calcular_distribuicao(n_assuntos, data_inicio, dias_semana_ativos,
@@ -3861,11 +3861,84 @@ div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
                   st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
 
                   # -- Flashcards em largura total (dentro do for, fora do container) --
-                  # Flashcards abertos automaticamente se existirem
-                  # Revisões usam o item original como fonte dos flashcards
                   if item.get("n_flashcards", 0) > 0:
-                      _fc_src_id = item.get("revisao_origem_id") or item["id"]
-                      fc_abrir_componente(_fc_src_id, item["assunto_nome"])
+                      # Mescla flashcards próprios + herdados do original (sem duplicatas)
+                      _fc_ids_vistos = set()
+                      _fc_merged = []
+                      for _src in [item["id"], item.get("revisao_origem_id", "")]:
+                          if _src:
+                              for _c in fc_para_json(_src):
+                                  if _c["id"] not in _fc_ids_vistos:
+                                      _fc_ids_vistos.add(_c["id"])
+                                      _fc_merged.append(_c)
+                      if _fc_merged:
+                          import json as _json
+                          import html as _html
+                          import streamlit.components.v1 as _components
+                          _cards_json = _json.dumps(_fc_merged, ensure_ascii=False)
+                          _titulo_safe = _html.escape(item["assunto_nome"])
+                          _component_html = fc_janela_html(_cards_json, item["assunto_nome"])
+                          # Reusar fc_abrir_componente mas com lista já montada
+                          import base64 as _b64
+                          _b64_str = _b64.b64encode(_component_html.encode("utf-8")).decode("ascii")
+                          _comp_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:#f0f4f8;padding:16px;min-height:100%}}
+.wrap{{background:#fff;border-radius:14px;padding:24px 28px;
+       box-shadow:0 4px 24px rgba(0,0,0,.12)}}
+.label{{font-size:11px;font-weight:700;color:#19747E;text-transform:uppercase;
+        letter-spacing:.08em;margin-bottom:4px}}
+.titulo{{font-size:17px;font-weight:600;color:#1a1a1a;margin-bottom:20px;line-height:1.3}}
+.fc-card{{width:100%;min-height:160px;perspective:800px;cursor:pointer;margin-bottom:8px}}
+.fc-inner{{width:100%;min-height:160px;position:relative;transform-style:preserve-3d;
+           transition:transform .4s ease;border-radius:12px}}
+.fc-inner.flipped{{transform:rotateY(180deg)}}
+.fc-face{{position:absolute;width:100%;min-height:160px;backface-visibility:hidden;
+          border-radius:12px;display:flex;align-items:center;justify-content:center;
+          padding:20px;text-align:center;font-size:15px;line-height:1.6}}
+.fc-front{{background:#f0f9ff;border:2px solid #19747E;color:#1a1a1a}}
+.fc-back{{background:#f6fbf7;border:2px solid #28a745;color:#1a1a1a;transform:rotateY(180deg)}}
+.hint{{font-size:11px;color:#aaa;text-align:center;margin-bottom:14px}}
+.nav{{display:flex;align-items:center;justify-content:space-between;margin-top:4px}}
+.btn{{padding:8px 20px;border-radius:8px;border:1px solid #ddd;background:#f2f2f2;
+      cursor:pointer;font-size:13px;font-weight:600}}
+.btn:hover:not(:disabled){{background:#e0e0e0}}
+.btn:disabled{{opacity:.3;cursor:default}}
+.counter{{font-size:13px;color:#555;font-weight:600}}
+</style></head><body><div class='wrap'>
+<div class='label'>Flashcards</div>
+<div class='titulo'>{_titulo_safe}</div>
+<div id='body'></div>
+</div>
+<script>
+const cards={_cards_json};
+let idx=0;
+function render(){{
+  const b=document.getElementById('body');
+  if(!cards.length){{b.innerHTML="<p style='color:#aaa;text-align:center;padding:30px'>Sem cards.</p>";return;}}
+  const c=cards[idx];
+  b.innerHTML=`
+    <div class='fc-card' onclick='flip()'>
+      <div class='fc-inner' id='fci'>
+        <div class='fc-face fc-front'>${{c.frente}}</div>
+        <div class='fc-face fc-back'>${{c.verso}}</div>
+      </div>
+    </div>
+    <div class='hint'>Clique no card para virar</div>
+    <div class='nav'>
+      <button class='btn' ${{idx===0?'disabled':''}} onclick='prev()'>&#8592; Anterior</button>
+      <span class='counter'>${{idx+1}} / ${{cards.length}}</span>
+      <button class='btn' ${{idx===cards.length-1?'disabled':''}} onclick='next()'>Pr&#243;ximo &#8594;</button>
+    </div>`;
+}}
+function flip(){{document.getElementById('fci').classList.toggle('flipped');}}
+function prev(){{if(idx>0){{idx--;render();}}}}
+function next(){{if(idx<cards.length-1){{idx++;render();}}}}
+render();
+</script></body></html>"""
+                          _components.html(_comp_html, height=440, scrolling=False)
 
               st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
 
