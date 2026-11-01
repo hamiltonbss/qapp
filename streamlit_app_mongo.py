@@ -46,7 +46,7 @@ def _secret(nome, padrao=""):
 MONGO_URI = _secret("MONGO_URI", "")
 MONGO_DB_NAME = _secret("MONGO_DB_NAME", "quiz_app")
 
-ADMIN_LOGIN = "hamiltonbss"
+ADMIN_LOGIN = _secret("ADMIN_LOGIN", "").strip().lower()
 SISTEMA = "— Sistema —"
 LETRAS = "ABCDE"
 
