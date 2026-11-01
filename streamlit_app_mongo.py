@@ -16,6 +16,8 @@ import pandas as pd
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson import ObjectId
 
+import flashcards  # módulo separado (flashcards.py, na mesma pasta)
+
 try:
     import bcrypt
     _BCRYPT_OK = True
@@ -364,6 +366,14 @@ def _init_db_once():
         lambda: db.est_assuntos.create_index([("disciplina_id", ASCENDING)]),
         lambda: db.est_planejamento.create_index([("plano_id", ASCENDING), ("data", ASCENDING)]),
         lambda: db.flashcards.create_index([("item_id", ASCENDING)]),
+        lambda: flashcards.init_indexes(db),
+        lambda: db.questionarios.update_many(
+            {"disciplina": {"$exists": False}}, {"$set": {"disciplina": "Sem Disciplina"}}),
+    ]
+    if not ADMIN_LOGIN:  # sem o Secret, não migra dados antigos para um login vazio
+        print("[init_db] Secret ADMIN_LOGIN não configurado: migrações do admin ignoradas.")
+    else:
+        passos += [
         # Cadernos especiais antigos (globais) passam a pertencer ao admin
         lambda: db.questionarios.update_one(
             {"nome": "Favoritos", "especial": {"$exists": False}},
@@ -371,15 +381,14 @@ def _init_db_once():
         lambda: db.questionarios.update_one(
             {"nome": "Caderno de Erros", "especial": {"$exists": False}},
             {"$set": {"especial": "erros", "dono": ADMIN_LOGIN}}),
-        lambda: db.questionarios.update_many(
-            {"disciplina": {"$exists": False}}, {"$set": {"disciplina": "Sem Disciplina"}}),
         # Histórico antigo (sem usuário) pertence ao admin
         lambda: db.respostas.update_many(
             {"usuario_login": {"$exists": False}}, {"$set": {"usuario_login": ADMIN_LOGIN}}),
         lambda: db.simulados.update_many(
             {"usuario_login": {"$exists": False}}, {"$set": {"usuario_login": ADMIN_LOGIN}}),
         lambda: init_usuarios(db),
-    ]
+        ]
+    passos.append(lambda: _registrar_respostas_simulados_antigos(db))
     for p in passos:
         _safe(p)
     return True
@@ -836,7 +845,11 @@ def popular_caderno_erros(login=None):
 # Estatísticas (em lote)
 # =============================
 def bulk_stats(questionario_ids, login=None):
-    """qid(str) -> {total, respondidas, corretas, perc} em duas agregações."""
+    """qid(str) -> {total, respondidas, corretas, perc, cobertura} em duas agregações.
+    - perc (aproveitamento): corretas / respondidas — desempenho nas questões resolvidas,
+      considerando a última resposta de cada questão (Praticar e simulados).
+    - cobertura: respondidas / total — quanto do questionário já foi resolvido.
+    Só contam questões que ainda existem (ex.: as que saíram do Caderno de Erros não)."""
     login = login or login_atual()
     ids = [str(q) for q in questionario_ids if _oid(q)]
     if not ids:
@@ -864,6 +877,9 @@ def bulk_stats(questionario_ids, login=None):
                 "_id": {"questionario_id": "$questionario_id", "questao_id": "$questao_id"},
                 "last_correto": {"$last": "$correto"},
             }},
+            {"$lookup": {"from": "questoes", "localField": "_id.questao_id",
+                         "foreignField": "_id", "as": "q"}},
+            {"$match": {"q.0": {"$exists": True}}},
             {"$group": {
                 "_id": "$_id.questionario_id",
                 "respondidas": {"$sum": 1},
@@ -879,12 +895,19 @@ def bulk_stats(questionario_ids, login=None):
     for q in ids:
         total = totals.get(q, 0)
         respondidas, corretas = resp.get(q, (0, 0))
-        perc = (corretas / total) * 100 if total > 0 else 0.0
-        out[q] = {"total": total, "respondidas": respondidas, "corretas": corretas, "perc": perc}
+        respondidas = min(respondidas, total)
+        out[q] = {"total": total, "respondidas": respondidas, "corretas": min(corretas, respondidas),
+                  **taxas_desempenho(total, respondidas, corretas)}
     return out
 
 
-_STATS_VAZIO = {"total": 0, "respondidas": 0, "corretas": 0, "perc": 0.0}
+def taxas_desempenho(total, respondidas, corretas):
+    """Aproveitamento sobre as resolvidas e cobertura sobre o total."""
+    return {"perc": (corretas / respondidas) * 100 if respondidas else 0.0,
+            "cobertura": (respondidas / total) * 100 if total else 0.0}
+
+
+_STATS_VAZIO = {"total": 0, "respondidas": 0, "corretas": 0, "perc": 0.0, "cobertura": 0.0}
 
 
 # =============================
@@ -1107,14 +1130,23 @@ def caixa_explicacao(texto):
 
 
 def _bloco_metricas(s, sufixo="", show_respondidas=True, label_aprov="Aproveitamento"):
+    """Métricas + duas barras: aproveitamento (acertos/resolvidas) e progresso (resolvidas/total)."""
     if show_respondidas:
         c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-        c2.metric(f"Respondidas{sufixo}", s["respondidas"])
+        c2.metric(f"Resolvidas{sufixo}", s["respondidas"])
     else:
         c1, c3, c4 = st.columns([1, 1, 2])
     c1.metric(f"Total{sufixo}", s["total"])
-    c3.metric(f"Corretas{sufixo}", s["corretas"])
-    c4.progress(min(100, int(s["perc"])), text=f"{label_aprov}: {s['perc']:.1f}%")
+    c3.metric(f"Corretas{sufixo}", s["corretas"],
+              delta=f"{s['respondidas'] - s['corretas']} erradas" if s["respondidas"] else None,
+              delta_color="off")
+    if s["respondidas"]:
+        c4.progress(min(100, int(s["perc"])),
+                    text=f"{label_aprov}: {s['perc']:.1f}% ({s['corretas']} de {s['respondidas']} resolvidas)")
+    else:
+        c4.progress(0, text=f"{label_aprov}: — (nenhuma questão resolvida)")
+    cob = s.get("cobertura", 0.0)
+    c4.progress(min(100, int(cob)), text=f"Progresso: {cob:.1f}% resolvido ({s['respondidas']} de {s['total']})")
 
 
 def show_desempenho_block(qid, show_respondidas=False):
@@ -1317,18 +1349,28 @@ def page_dashboard():
 
         rows = []
         for disc, a in sorted(agg.items()):
-            perc = (a["corretas"] / a["total"]) * 100 if a["total"] else 0.0
+            t = taxas_desempenho(a["total"], a["respondidas"], a["corretas"])
             rows.append({
                 "Disciplina": disc,
                 "Questionários": a["questionarios"],
                 "Total": a["total"],
-                "Respondidas": a["respondidas"],
+                "Resolvidas": a["respondidas"],
                 "Corretas": a["corretas"],
-                "Aproveitamento (%)": round(perc, 1),
+                "Aproveitamento (%)": round(t["perc"], 1) if a["respondidas"] else None,
+                "Progresso (%)": round(t["cobertura"], 1),
             })
 
         st.subheader("Resumo por disciplina")
-        st.dataframe(rows, width="stretch", hide_index=True)
+        st.dataframe(
+            rows, width="stretch", hide_index=True,
+            column_config={
+                "Aproveitamento (%)": st.column_config.ProgressColumn(
+                    "Aproveitamento", help="Acertos ÷ questões resolvidas (última resposta de cada questão)",
+                    format="%.1f%%", min_value=0, max_value=100),
+                "Progresso (%)": st.column_config.ProgressColumn(
+                    "Progresso", help="Questões resolvidas ÷ total da disciplina",
+                    format="%.1f%%", min_value=0, max_value=100),
+            })
         st.caption("Dica: selecione uma disciplina acima para ver e acessar os questionários sem carregar o painel inteiro.")
         return
 
@@ -1343,7 +1385,7 @@ def page_dashboard():
     qids_disc = [q["id"] for q in qs_disc]
     stats_disc = bulk_stats(qids_disc, login)
     tot = {k: sum(stats_disc[q][k] for q in qids_disc) for k in ("total", "respondidas", "corretas")}
-    tot["perc"] = (tot["corretas"] / tot["total"]) * 100 if tot["total"] else 0.0
+    tot.update(taxas_desempenho(tot["total"], tot["respondidas"], tot["corretas"]))
 
     with st.container(border=True):
         st.subheader(f"📦 {escolha_disc}")
@@ -1775,6 +1817,7 @@ def finalizar_simulado(sim):
             "duracao_seg": int((agora - inicio).total_seconds()),
             "updated_at": agora.isoformat(),
         }})
+    registrar_respostas_simulado(sim, resultado, agora.isoformat())
 
     if (sim.get("meta") or {}).get("enviar_erros_caderno", True):
         erros = get_caderno_especial("erros", sim.get("usuario_login"))
@@ -1804,7 +1847,41 @@ def garantir_resultado(sim):
         resultado.append(_linha_resultado(qid, qmap.get(qid), qinfo, resp, acertou=bool(r and r.get("correto"))))
     get_db().simulados.update_one({"_id": sim["_id"]}, {"$set": {"resultado": resultado}})
     sim["resultado"] = resultado
+    registrar_respostas_simulado(sim, resultado, sim.get("finished_at") or sim.get("updated_at"))
     return sim
+
+
+def registrar_respostas_simulado(sim, resultado, quando=None):
+    """Grava as questões resolvidas no simulado em 'respostas' (origem='simulado'), para que
+    o Painel e o Praticar reflitam também o desempenho nos simulados. Em branco não conta.
+    Idempotente: marca o simulado com 'respostas_registradas'."""
+    db = get_db()
+    marcado = db.simulados.update_one(
+        {"_id": sim["_id"], "respostas_registradas": {"$ne": True}},
+        {"$set": {"respostas_registradas": True}})
+    if not marcado.modified_count:
+        return 0
+    quando = quando or _now_iso()
+    docs = [{
+        "usuario_login": sim.get("usuario_login"),
+        "questionario_id": ObjectId(r["questionario_id"]),
+        "questao_id": ObjectId(r["questao_id"]),
+        "correto": 1 if r.get("acertou") else 0,
+        "respondido_em": quando,
+        "origem": "simulado",
+        "simulado_id": sim["_id"],
+    } for r in resultado if not r.get("em_branco") and _oid(r.get("questionario_id")) and _oid(r.get("questao_id"))]
+    if docs:
+        db.respostas.insert_many(docs, ordered=False)
+    return len(docs)
+
+
+def _registrar_respostas_simulados_antigos(db):
+    """Simulados finalizados antes desta versão também passam a contar no progresso."""
+    for s in db.simulados.find({"status": "finished", "resultado.0": {"$exists": True},
+                                "respostas_registradas": {"$ne": True}},
+                               {"usuario_login": 1, "resultado": 1, "finished_at": 1, "updated_at": 1}):
+        registrar_respostas_simulado(s, s["resultado"], s.get("finished_at") or s.get("updated_at"))
 
 
 def resumo_resultado(res):
@@ -2122,7 +2199,8 @@ def mapa_desempenho_questoes(login):
     especiais são atribuídas à questão de origem."""
     db = get_db()
     eventos = []  # (quando, questao_id, acertou)
-    for d in db.respostas.find({"usuario_login": login},
+    # respostas de simulado já entram pelo 'resultado' abaixo (não contar duas vezes)
+    for d in db.respostas.find({"usuario_login": login, "origem": {"$ne": "simulado"}},
                                {"questao_id": 1, "correto": 1, "respondido_em": 1}):
         eventos.append((d.get("respondido_em") or "", str(d.get("questao_id")), bool(d.get("correto"))))
     for s in db.simulados.find({"usuario_login": login, "status": "finished"},
@@ -4361,7 +4439,7 @@ def main():
     if "go_to" in st.session_state:
         st.session_state["nav_choice"] = st.session_state.pop("go_to")
 
-    nav_pages = ["Painel", "Plano de Estudos", "Praticar", "Gerenciar", "Importar CSV", "Simulados"]
+    nav_pages = ["Painel", "Plano de Estudos", "Praticar", "Flashcards", "Gerenciar", "Importar CSV", "Simulados"]
     if is_admin():
         nav_pages.append("Usuários")
 
@@ -4375,6 +4453,8 @@ def main():
         page_estudos()
     elif choice == "Praticar":
         page_praticar()
+    elif choice == "Flashcards":
+        flashcards.render_page(get_db(), login_atual())
     elif choice == "Gerenciar":
         page_gerenciar()
     elif choice == "Importar CSV":
