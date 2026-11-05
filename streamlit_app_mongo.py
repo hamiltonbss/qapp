@@ -16,7 +16,8 @@ import pandas as pd
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson import ObjectId
 
-import flashcards  # módulo separado (flashcards.py, na mesma pasta)
+import flashcards  # módulos separados (na mesma pasta do app.py)
+import sintaxe
 
 try:
     import bcrypt
@@ -367,6 +368,10 @@ def _init_db_once():
         lambda: db.est_planejamento.create_index([("plano_id", ASCENDING), ("data", ASCENDING)]),
         lambda: db.flashcards.create_index([("item_id", ASCENDING)]),
         lambda: flashcards.init_indexes(db),
+        lambda: sintaxe.init_indexes(db),
+        lambda: db.cenarios.create_index([("usuario_login", ASCENDING), ("nome", ASCENDING)], name="idx_cenarios"),
+        lambda: db.simulados.create_index([("usuario_login", ASCENDING), ("meta.cenario_id", ASCENDING)],
+                                          name="idx_sim_cenario"),
         lambda: db.questionarios.update_many(
             {"disciplina": {"$exists": False}}, {"$set": {"disciplina": "Sem Disciplina"}}),
     ]
@@ -553,7 +558,7 @@ def resetar_resolucoes(qid, login=None):
 
     # Limpa somente o estado de tela das questões deste questionário
     ids = [str(d["_id"]) for d in db.questoes.find({"questionario_id": oid}, {"_id": 1})]
-    alvo = {f"pool_{qid}", f"idx_{qid}"}
+    alvo = {f"pool_{qid}", f"idx_{qid}", f"pr_sub_{qid}"}
     for i in ids:
         alvo.update(f"{p}{i}" for p in ("answered_", "result_", "vf_", "answer_letter_"))
         alvo.update(f"strike_{i}_{l}" for l in LETRAS)
@@ -690,7 +695,27 @@ def alocar_cotas(counts, n, modo="igual", pesos=None):
     return alloc
 
 
-def sortear_por_cotas(alloc, excluir_ids=None):
+def _filtro_tipo(tipo):
+    """Filtro Mongo por tipo de questão ('VF' inclui documentos antigos sem o campo)."""
+    if tipo == "VF":
+        return {"tipo": {"$in": ["VF", None]}}
+    return {"tipo": tipo} if tipo else {}
+
+
+def contar_questoes_por_tipo(questionario_ids, tipo=None):
+    """{questionario_id: nº de questões} só do tipo pedido (None = todos)."""
+    if not tipo:
+        m = contar_questoes_por_questionario()
+        return {str(q): m.get(str(q), 0) for q in questionario_ids}
+    oids = [o for o in (_oid(q) for q in questionario_ids) if o]
+    pipe = [{"$match": {"questionario_id": {"$in": oids}, **_filtro_tipo(tipo)}},
+            {"$group": {"_id": "$questionario_id", "n": {"$sum": 1}}}]
+    out = {str(q): 0 for q in questionario_ids}
+    out.update({str(d["_id"]): int(d["n"]) for d in get_db().questoes.aggregate(pipe)})
+    return out
+
+
+def sortear_por_cotas(alloc, excluir_ids=None, tipo=None):
     """Sorteia k questões de cada questionário ({qid: k}); retorna ids embaralhados."""
     db = get_db()
     excl = [o for o in (_oid(x) for x in (excluir_ids or [])) if o]
@@ -698,7 +723,7 @@ def sortear_por_cotas(alloc, excluir_ids=None):
     for qid_str, k in alloc.items():
         if k <= 0 or not _oid(qid_str):
             continue
-        match = {"questionario_id": ObjectId(qid_str)}
+        match = {"questionario_id": ObjectId(qid_str), **_filtro_tipo(tipo)}
         if excl:
             match["_id"] = {"$nin": excl}
         pipe = [{"$match": match}, {"$sample": {"size": int(k)}}, {"$project": {"_id": 1}}]
@@ -1477,33 +1502,107 @@ def page_praticar():
         st.info("Acabaram as questões! Você pode **resetar resoluções** para reiniciar.")
         return
 
-    idx = max(0, min(int(st.session_state.get(key_idx, 0)), len(pool) - 1))
-    st.session_state[key_idx] = idx
+    # ---- Filtro: todas / não respondidas / erradas / acertadas ----
+    situacao = situacao_questoes(qid)
+    contagem = {f: sum(1 for x in pool if _PR_FILTROS[f](situacao.get(x))) for f in _PR_FILTROS}
+    fcol1, fcol2 = st.columns([4, 1])
+    with fcol1:
+        filtro = st.radio("Responder", list(_PR_FILTROS), horizontal=True, key=f"pr_filtro_{qid}",
+                          format_func=lambda f: f"{f} ({contagem[f]})",
+                          help="Situação pela sua última resposta (Praticar e simulados).")
+    sub_key = f"pr_sub_{qid}"
+    with fcol2:
+        atualizar = st.button("🔄 Atualizar lista", key=f"pr_atualizar_{qid}", disabled=filtro == "Todas",
+                              help="Recalcula o filtro. A lista fica fixa enquanto você responde, "
+                                   "para a questão não sumir da tela ao ser respondida.")
 
-    row = get_questao_by_id(pool[idx])
+    if filtro == "Todas":
+        st.session_state.pop(sub_key, None)
+        lista = pool
+        idx = max(0, min(int(st.session_state.get(key_idx, 0)), len(pool) - 1))
+        st.session_state[key_idx] = idx
+        ir = lambda novo: (_praticar_ir, (qid, pool, novo))
+    else:
+        sub = st.session_state.get(sub_key)
+        if atualizar or not sub or sub["filtro"] != filtro:
+            ids = [x for x in pool if _PR_FILTROS[filtro](situacao.get(x))]
+            if filtro != "Não respondidas":
+                _liberar_para_responder_de_novo(ids)
+            sub = {"filtro": filtro, "ids": ids, "idx": 0}
+            st.session_state[sub_key] = sub
+        lista = sub["ids"]
+        if not lista:
+            st.success({"Não respondidas": "🎉 Você já respondeu todas as questões deste questionário.",
+                        "Erradas": "🎉 Nenhuma questão com a última resposta errada.",
+                        "Acertadas": "Nenhuma questão acertada ainda."}[filtro])
+            st.subheader("Desempenho")
+            show_desempenho_block(qid, show_respondidas=True)
+            return
+        idx = max(0, min(int(sub.get("idx", 0)), len(lista) - 1))
+        sub["idx"] = idx
+        ir = lambda novo: (_praticar_ir_filtro, (sub_key, novo))
+
+    row = get_questao_by_id(lista[idx])
     if row is None:  # removida (ex.: saiu do Caderno de Erros)
-        pool.pop(idx)
-        _praticar_ir(qid, pool, max(0, min(idx, len(pool) - 1)))
+        lista.pop(idx)
+        if lista is pool:
+            _praticar_ir(qid, pool, max(0, min(idx, len(pool) - 1)))
         st.rerun()
 
-    total_questoes = len(pool)
+    total_questoes = len(lista)
     nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 2])
     with nav_col1:
-        st.button("◀ Questão anterior", key="prev_top", disabled=(idx == 0),
-                  on_click=_praticar_ir, args=(qid, pool, idx - 1))
+        cb, args = ir(idx - 1)
+        st.button("◀ Questão anterior", key="prev_top", disabled=(idx == 0), on_click=cb, args=args)
     with nav_col2:
-        st.button("Próxima questão ▶", key="next_top", disabled=(idx >= total_questoes - 1),
-                  on_click=_praticar_ir, args=(qid, pool, idx + 1))
+        cb, args = ir(idx + 1)
+        st.button("Próxima questão ▶", key="next_top", disabled=(idx >= total_questoes - 1), on_click=cb, args=args)
     with nav_col3:
-        st.markdown(f"**Questão {idx + 1} de {total_questoes}**")
+        rotulo = "" if filtro == "Todas" else f" · filtro: {filtro.lower()}"
+        st.markdown(f"**Questão {idx + 1} de {total_questoes}**{rotulo}")
 
     render_questao(row, parent_qid=qid, questao_numero=idx + 1, is_caderno_erros=is_erros)
 
     st.subheader("Desempenho")
     show_desempenho_block(qid, show_respondidas=True)
 
-    st.button("Próxima questão ▶", key="next_bottom", disabled=(idx >= total_questoes - 1),
-              on_click=_praticar_ir, args=(qid, pool, idx + 1))
+    cb, args = ir(idx + 1)
+    st.button("Próxima questão ▶", key="next_bottom", disabled=(idx >= total_questoes - 1), on_click=cb, args=args)
+
+
+# Situação = última resposta da questão: None (nunca respondida), 1 (acertou) ou 0 (errou)
+_PR_FILTROS = {
+    "Todas": lambda s: True,
+    "Não respondidas": lambda s: s is None,
+    "Erradas": lambda s: s == 0,
+    "Acertadas": lambda s: s == 1,
+}
+
+
+def situacao_questoes(questionario_id, login=None):
+    """{questao_id: última resposta (1/0)} do usuário neste questionário."""
+    pipe = [
+        {"$match": {"usuario_login": login or login_atual(), "questionario_id": ObjectId(questionario_id)}},
+        {"$sort": {"respondido_em": 1}},
+        {"$group": {"_id": "$questao_id", "last": {"$last": "$correto"}}},
+    ]
+    return {str(d["_id"]): int(d["last"] or 0) for d in get_db().respostas.aggregate(pipe)}
+
+
+def _liberar_para_responder_de_novo(ids):
+    """Destrava, nesta sessão, questões já respondidas (para refazer erradas/acertadas)."""
+    prefixos = ("answered_", "result_", "vf_", "answer_letter_")
+    for qid in ids:
+        for p in prefixos:
+            st.session_state.pop(f"{p}{qid}", None)
+        for l in LETRAS:
+            st.session_state.pop(f"strike_{qid}_{l}", None)
+
+
+def _praticar_ir_filtro(sub_key, novo_idx):
+    sub = st.session_state.get(sub_key)
+    if sub:
+        sub["idx"] = novo_idx
 
 
 def page_gerenciar():
@@ -1969,6 +2068,8 @@ def refazer_simulado(sim, somente_erradas=False):
     random.shuffle(ids)
     meta = dict(sim.get("meta") or {})
     meta["tentativa_de"] = sim["id"]
+    if somente_erradas:  # prova parcial não entra no histórico do cenário
+        meta.pop("cenario_id", None)
     sufixo = "erradas" if somente_erradas else "nova tentativa"
     return create_simulado(f"{sim.get('nome', 'Simulado')} — {sufixo}", ids, meta)
 
@@ -2521,6 +2622,11 @@ def _sim_tentativa(sim):
     meta = sim.get("meta") or {}
 
     respondidas = sum(1 for q in pool if rasc.get(q))
+    cfg = meta.get("cenario")
+    if cfg and cfg.get("penalidade"):
+        st.info(f"🏛️ Cenário **{cfg.get('nome', '')}**: cada errada desconta "
+                f"{float(cfg.get('fator_penalidade') or 1):g} certa. Em branco não pontua nem desconta — "
+                "use **Limpar minha escolha** para deixar uma questão em branco.")
     top1, top2 = st.columns([3, 1])
     with top1:
         st.progress(int(respondidas / n * 100) if n else 0, text=f"{respondidas} de {n} questões respondidas")
@@ -2617,8 +2723,12 @@ def _sim_resumo(sim):
     st.dataframe(rows, width="stretch", hide_index=True, height=min(38 * len(rows) + 40, 420))
 
     branco = sum(1 for q in pool if not rasc.get(q))
+    cfg = (sim.get("meta") or {}).get("cenario") or {}
     if branco:
-        st.warning(f"{branco} questão(ões) em branco serão contadas como erradas.")
+        if cfg.get("penalidade"):
+            st.info(f"{branco} questão(ões) em branco: no cenário, não pontuam nem descontam.")
+        else:
+            st.warning(f"{branco} questão(ões) em branco serão contadas como erradas.")
     if marcadas:
         st.info(f"{len(marcadas)} questão(ões) marcadas para revisão.")
 
@@ -2692,6 +2802,11 @@ def _sim_revisao(sim):
     m3.metric("Erros", r["erros"])
     m4.metric("Em branco", r["em_branco"])
     m5.metric("Aproveitamento", f"{r['perc']:.1f}%", delta=delta)
+
+    cfg = (sim.get("meta") or {}).get("cenario")
+    if cfg:
+        with st.container(border=True):
+            _cen_bloco_resultado(res, cfg)
 
     filtro_key = f"simrv_f_{sim_id}"
     with st.sidebar:
@@ -2785,6 +2900,401 @@ def _sim_revisao(sim):
     alvo = st.session_state.pop(f"sim_scroll_{sim_id}", None)
     if alvo:
         _sim_rolar_para(f"simq-{alvo}")
+
+
+# =============================
+# Cenários de prova (edital)
+# =============================
+TIPOS_CENARIO = {"": "Todas (Certo/Errado e múltipla escolha)", "VF": "Certo/Errado (estilo Cespe)",
+                 "MC": "Múltipla escolha"}
+# Blocos da prova (ordem em que aparecem na prova gerada)
+BLOCOS = ["Conhecimentos básicos", "Conhecimentos específicos"]
+
+
+def _bloco_de(d):
+    return d.get("bloco") if d.get("bloco") in BLOCOS else BLOCOS[0]
+
+
+def listar_cenarios(login):
+    return [{**d, "id": str(d["_id"])} for d in
+            get_db().cenarios.find({"usuario_login": login}).sort("nome", ASCENDING)]
+
+
+def get_cenario(cen_id, login=None):
+    d = get_db().cenarios.find_one({"_id": _oid(cen_id), "usuario_login": login or login_atual()})
+    if d:
+        d["id"] = str(d["_id"])
+    return d
+
+
+def salvar_cenario(dados, cen_id=None, login=None):
+    login = login or login_atual()
+    dados = {**dados, "usuario_login": login, "updated_at": _now_iso()}
+    if cen_id:
+        get_db().cenarios.update_one({"_id": _oid(cen_id), "usuario_login": login}, {"$set": dados})
+        return cen_id
+    dados["created_at"] = dados["updated_at"]
+    return str(get_db().cenarios.insert_one(dados).inserted_id)
+
+
+def excluir_cenario(cen_id):
+    get_db().cenarios.delete_one({"_id": _oid(cen_id), "usuario_login": login_atual()})
+
+
+def disponibilidade_cenario(cen):
+    """{disciplina: questões disponíveis do tipo do cenário}."""
+    out = {}
+    for d in cen.get("disciplinas") or []:
+        qids = [q["id"] for q in get_questionarios_por_disciplina([d["disciplina"]])]
+        out[d["disciplina"]] = sum(contar_questoes_por_tipo(qids, cen.get("tipo") or None).values()) if qids else 0
+    return out
+
+
+def gerar_prova_cenario(cen):
+    """Sorteia a prova conforme o edital: n questões de cada disciplina, equilibradas entre os
+    questionários. Na ordem do edital (agrupada por disciplina) ou embaralhada. Retorna o id do simulado."""
+    tipo = cen.get("tipo") or None
+    blocos = []
+    # básicos antes dos específicos; dentro de cada bloco, a ordem da tabela
+    for d in sorted(cen.get("disciplinas") or [], key=lambda d: BLOCOS.index(_bloco_de(d))):
+        qids = [q["id"] for q in get_questionarios_por_disciplina([d["disciplina"]])]
+        if not qids or int(d.get("questoes") or 0) <= 0:
+            continue
+        alloc = alocar_cotas(contar_questoes_por_tipo(qids, tipo), int(d["questoes"]),
+                             cen.get("distribuicao") or "igual")
+        blocos.append(sortear_por_cotas(alloc, tipo=tipo))  # já embaralhado dentro da disciplina
+    pool = [x for b in blocos for x in b]
+    if not cen.get("agrupar", True):
+        random.shuffle(pool)
+    if not pool:
+        return None
+    retrato = {k: cen.get(k) for k in ("nome", "banca", "tipo", "total", "disciplinas", "penalidade",
+                                       "fator_penalidade", "nota_corte", "minimos_bloco", "tempo_limite_min")}
+    return create_simulado(
+        f"{cen['nome']} — {datetime.now(FUSO).strftime('%d/%m/%Y %H:%M')}", pool,
+        meta={"modo": "Cenário de prova", "cenario_id": cen["id"], "cenario": retrato,
+              "tempo_limite_min": int(cen.get("tempo_limite_min") or 0), "por_pagina": 0,
+              "enviar_erros_caderno": True})
+
+
+def pontuacao_cenario(res, cfg):
+    """Pontuação da prova segundo o cenário: pesos por disciplina, penalidade
+    (cada errada desconta 'fator' certas; em branco não pontua nem desconta), mínimos e corte."""
+    fator = float(cfg.get("fator_penalidade") or 0) if cfg.get("penalidade") else 0.0
+    conf = {d["disciplina"]: d for d in cfg.get("disciplinas") or []}
+    ordem = [d["disciplina"] for d in cfg.get("disciplinas") or []]
+    por = {}
+    for r in res:
+        a = por.setdefault(r.get("disciplina") or "Sem Disciplina", {"n": 0, "certas": 0, "erradas": 0, "branco": 0})
+        a["n"] += 1
+        if r.get("acertou"):
+            a["certas"] += 1
+        elif r.get("em_branco"):
+            a["branco"] += 1
+        else:
+            a["erradas"] += 1
+
+    linhas, tot = [], {"liq": 0.0, "max": 0.0, "bruto": 0.0, "desconto": 0.0}
+    eliminado_em = []
+    for disc in sorted(por, key=lambda d: (ordem.index(d) if d in ordem else 99, d)):
+        a, c = por[disc], conf.get(disc, {})
+        peso = float(c.get("peso") or 1)
+        bruto = a["certas"] * peso
+        desconto = fator * a["erradas"] * peso
+        liq = bruto - desconto
+        minimo = float(c.get("minimo") or 0)
+        ok = liq >= minimo if minimo else True
+        if not ok:
+            eliminado_em.append(disc)
+        linhas.append({"Bloco": _bloco_de(c), "Disciplina": disc, "Questões": a["n"], "Peso": peso, "Certas": a["certas"],
+                       "Erradas": a["erradas"], "Em branco": a["branco"], "Pontos brutos": round(bruto, 2),
+                       "Desconto": round(-desconto, 2), "Nota líquida": round(liq, 2),
+                       "Máximo": round(a["n"] * peso, 2), "Mínimo": minimo or None,
+                       "Situação": "✅" if ok else "❌ abaixo do mínimo"})
+        tot["liq"] += liq
+        tot["max"] += a["n"] * peso
+        tot["bruto"] += bruto
+        tot["desconto"] += desconto
+
+    # Totais por bloco (básicos / específicos) e mínimo de cada bloco
+    minimos_bloco = cfg.get("minimos_bloco") or {}
+    blocos = []
+    for bloco in BLOCOS:
+        do_bloco = [l for l in linhas if l["Bloco"] == bloco]
+        if not do_bloco:
+            continue
+        liq = sum(l["Nota líquida"] for l in do_bloco)
+        maxi = sum(l["Máximo"] for l in do_bloco)
+        minimo = float(minimos_bloco.get(bloco) or 0)
+        ok = liq >= minimo if minimo else True
+        if not ok:
+            eliminado_em.append(bloco)
+        blocos.append({"Bloco": bloco, "Questões": sum(l["Questões"] for l in do_bloco),
+                       "Certas": sum(l["Certas"] for l in do_bloco), "Erradas": sum(l["Erradas"] for l in do_bloco),
+                       "Em branco": sum(l["Em branco"] for l in do_bloco),
+                       "Desconto": round(sum(l["Desconto"] for l in do_bloco), 2),
+                       "Nota líquida": round(liq, 2), "Máximo": round(maxi, 2),
+                       "% da máxima": round(liq / maxi * 100, 1) if maxi else 0.0,
+                       "Mínimo": minimo or None, "Situação": "✅" if ok else "❌ abaixo do mínimo"})
+
+    corte = float(cfg.get("nota_corte") or 0)
+    tem_criterio = (bool(corte) or any(float(c.get("minimo") or 0) for c in conf.values())
+                    or any(float(v or 0) for v in minimos_bloco.values()))
+    if eliminado_em:
+        situacao = "❌ Eliminado por mínimo em: " + ", ".join(eliminado_em)
+    elif corte and tot["liq"] < corte:
+        situacao = f"❌ Abaixo da nota de corte ({corte:g})"
+    elif tem_criterio:
+        situacao = "✅ Aprovado no cenário"
+    else:
+        situacao = "— Sem nota de corte nem mínimos definidos"
+    perc = tot["liq"] / tot["max"] * 100 if tot["max"] else 0.0
+    return {"linhas": linhas, "blocos": blocos, "liquida": tot["liq"], "maximo": tot["max"], "bruta": tot["bruto"],
+            "desconto": tot["desconto"], "perc": perc, "corte": corte, "situacao": situacao,
+            "aprovado": situacao.startswith("✅"), "tem_criterio": tem_criterio, "fator": fator}
+
+
+def _cen_bloco_resultado(res, cfg):
+    """Resultado da prova no padrão do edital (usado na revisão do simulado)."""
+    p = pontuacao_cenario(res, cfg)
+    st.markdown(f"#### 🏛️ Resultado no cenário: {esc(cfg.get('nome', ''))}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Nota líquida", f"{p['liquida']:.2f}", help=f"De {p['maximo']:g} pontos possíveis")
+    m2.metric("% da nota máxima", f"{p['perc']:.1f}%")
+    m3.metric("Nota de corte", f"{p['corte']:g}" if p["corte"] else "—",
+              delta=f"{p['liquida'] - p['corte']:+.2f}" if p["corte"] else None)
+    m4.metric("Situação", ("Aprovado" if p["aprovado"] else "Reprovado") if p["tem_criterio"] else "—")
+    (st.success if p["aprovado"] else (st.warning if p["tem_criterio"] else st.info))(p["situacao"])
+    if len(p["blocos"]) > 1 or any(b["Mínimo"] for b in p["blocos"]):
+        st.markdown("**Por bloco**")
+        st.dataframe(p["blocos"], width="stretch", hide_index=True)
+    st.markdown("**Por disciplina**")
+    st.dataframe(p["linhas"], width="stretch", hide_index=True)
+    if p["fator"]:
+        st.caption(f"Cada errada descontou {p['fator']:g} questão certa (× peso). Os erros custaram "
+                   f"**{p['desconto']:.2f} pontos**; sem eles, a nota seria {p['bruta']:.2f}. "
+                   "Em branco não pontua nem desconta.")
+    return p
+
+
+def page_cenarios():
+    st.title("🏛️ Cenários de prova")
+    st.caption("Monte o cenário conforme o edital: total de questões, quantas por disciplina, pesos, "
+               "mínimos, nota de corte e a regra de que uma errada anula uma certa. "
+               "A prova gerada abre como um simulado e é corrigida no padrão do edital.")
+    msg = st.session_state.pop("_cen_msg", None)
+    if msg:
+        st.success(msg)
+
+    login = login_atual()
+    cenarios = listar_cenarios(login)
+    editando = st.session_state.get("cen_editando")
+    if editando is not None:
+        _cen_formulario(get_cenario(editando) if editando else None)
+        return
+
+    t1, t2 = st.tabs(["📋 Meus cenários", "➕ Novo cenário"])
+    with t1:
+        _cen_lista(cenarios)
+    with t2:
+        if st.button("Criar cenário", type="primary", key="cen_novo"):
+            st.session_state["cen_editando"] = ""
+            st.rerun()
+        st.caption("Dica: crie um cenário por concurso (ex.: 'TRF - Analista - Cespe 2026').")
+
+
+def _cen_lista(cenarios):
+    if not cenarios:
+        st.info("Nenhum cenário ainda. Use a aba **Novo cenário**.")
+        return
+    por_id = {c["id"]: c for c in cenarios}
+    cid = st.selectbox("Cenário", list(por_id), format_func=lambda i: por_id[i]["nome"])
+    cen = por_id[cid]
+
+    regra = (f"uma errada anula {cen.get('fator_penalidade', 1):g} certa" if cen.get("penalidade")
+             else "sem desconto por erro")
+    st.markdown(
+        f"**{esc(cen['nome'])}**" + (f" · {esc(cen.get('banca'))}" if cen.get("banca") else "")
+        + f"  \n{cen.get('total', 0)} questões · {TIPOS_CENARIO.get(cen.get('tipo') or '', '')} · {regra}"
+        + (f" · corte {cen['nota_corte']:g}" if cen.get("nota_corte") else "")
+        + (f" · {cen['tempo_limite_min']} min" if cen.get("tempo_limite_min") else ""))
+
+    disp = disponibilidade_cenario(cen)
+    linhas = [{"Bloco": _bloco_de(d), "Disciplina": d["disciplina"], "Questões": d.get("questoes", 0),
+               "Peso": d.get("peso", 1),
+               "Mínimo": d.get("minimo") or None, "Disponíveis no banco": disp.get(d["disciplina"], 0)}
+              for d in cen.get("disciplinas") or []]
+    st.dataframe(linhas, width="stretch", hide_index=True)
+    faltam = [l["Disciplina"] for l in linhas if l["Disponíveis no banco"] < l["Questões"]]
+    if faltam:
+        st.warning("Banco insuficiente em: " + ", ".join(faltam) + ". A prova sairá com menos questões nelas.")
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button("▶ Gerar prova", type="primary", key=f"cen_gerar_{cid}", width="stretch"):
+        sim_id = gerar_prova_cenario(cen)
+        if sim_id:
+            _abrir_simulado(sim_id)
+            st.rerun()
+        st.warning("Não há questões nas disciplinas deste cenário.")
+    if c2.button("✏️ Editar", key=f"cen_edit_{cid}", width="stretch"):
+        st.session_state["cen_editando"] = cid
+        st.rerun()
+    with c3:
+        if botao_confirmado("🗑️ Excluir", key=f"cen_del_{cid}",
+                            mensagem=f"Excluir o cenário '{cen['nome']}'? As provas já feitas continuam em Simulados."):
+            excluir_cenario(cid)
+            st.rerun()
+
+    _cen_historico(cen)
+
+
+def _cen_historico(cen):
+    docs = list(get_db().simulados.find(
+        {"usuario_login": login_atual(), "status": "finished", "meta.cenario_id": cen["id"]}
+    ).sort("finished_at", ASCENDING))
+    st.markdown("#### 📈 Provas feitas neste cenário")
+    if not docs:
+        st.caption("Nenhuma prova finalizada ainda.")
+        return
+    hist, por_disc, por_bloco = [], {}, {}
+    for d in docs:
+        d["id"] = str(d["_id"])
+        res = garantir_resultado(d).get("resultado") or []
+        p = pontuacao_cenario(res, (d.get("meta") or {}).get("cenario") or cen)
+        for b in p["blocos"]:
+            por_bloco.setdefault(b["Bloco"], []).append(b["% da máxima"])
+        hist.append({"Data": _fmt_dt(d.get("finished_at")), "Nota líquida": round(p["liquida"], 2),
+                     "Máximo": p["maximo"], "% da máxima": round(p["perc"], 1),
+                     **{f"{b['Bloco']} (líq.)": b["Nota líquida"] for b in p["blocos"]},
+                     "Desconto por erros": round(-p["desconto"], 2), "Situação": p["situacao"]})
+        for l in p["linhas"]:
+            a = por_disc.setdefault(l["Disciplina"], [0.0, 0.0])
+            a[0] += l["Nota líquida"]
+            a[1] += l["Máximo"]
+    st.dataframe(hist, width="stretch", hide_index=True)
+    if len(hist) >= 2:
+        st.line_chart(pd.DataFrame({"% da nota máxima": [h["% da máxima"] for h in hist]},
+                                   index=pd.Index(range(1, len(hist) + 1), name="Prova nº")))
+    if len(por_bloco) > 1:
+        cols = st.columns(len(por_bloco))
+        for col, (bloco, percs) in zip(cols, por_bloco.items()):
+            col.metric(f"{bloco} — média", f"{sum(percs) / len(percs):.1f}%",
+                       delta=f"{percs[-1] - percs[0]:+.1f} p.p. desde a 1ª prova" if len(percs) > 1 else None)
+    st.markdown("**Média por disciplina (nota líquida ÷ máximo)**")
+    st.dataframe(sorted(({"Disciplina": k, "Aproveitamento líquido (%)": round(v[0] / v[1] * 100, 1) if v[1] else 0}
+                         for k, v in por_disc.items()), key=lambda r: r["Aproveitamento líquido (%)"]),
+                 width="stretch", hide_index=True)
+
+
+def _cen_formulario(cen):
+    cen = cen or {}
+    cid = cen.get("id", "novo")
+    st.subheader("✏️ Editar cenário" if cen else "➕ Novo cenário")
+    disciplinas = [d for d in get_all_disciplinas() if d != SISTEMA]
+
+    a1, a2 = st.columns([2, 1])
+    nome = a1.text_input("Nome do cenário", value=cen.get("nome", ""), key=f"cen_nome_{cid}",
+                         placeholder="Ex.: TRF 1ª Região — Analista Judiciário")
+    banca = a2.text_input("Banca (opcional)", value=cen.get("banca", ""), key=f"cen_banca_{cid}")
+
+    b1, b2, b3 = st.columns(3)
+    tipos = list(TIPOS_CENARIO)
+    tipo = b1.selectbox("Tipo de questão", tipos, index=tipos.index(cen.get("tipo") or ""),
+                        format_func=TIPOS_CENARIO.get, key=f"cen_tipo_{cid}")
+    total = b2.number_input("Total de questões (edital)", min_value=1, max_value=500,
+                            value=int(cen.get("total") or 120), step=1, key=f"cen_total_{cid}")
+    tempo = b3.number_input("Tempo de prova (min, 0 = livre)", min_value=0, max_value=600,
+                            value=int(cen.get("tempo_limite_min") or 0), step=10, key=f"cen_tempo_{cid}")
+
+    c1, c2, c3 = st.columns(3)
+    penal = c1.toggle("Uma errada anula uma certa", value=bool(cen.get("penalidade", tipo == "VF")),
+                      key=f"cen_pen_{cid}")
+    fator = c2.number_input("Cada errada desconta (questões certas)", min_value=0.0, max_value=2.0,
+                            value=float(cen.get("fator_penalidade") or 1.0), step=0.25,
+                            disabled=not penal, key=f"cen_fator_{cid}",
+                            help="1 = uma errada anula uma certa (Cespe). 0,5 = duas erradas anulam uma. "
+                                 "0,25 = quatro erradas anulam uma.")
+    corte = c3.number_input("Nota de corte (pontos líquidos, 0 = sem corte)", min_value=0.0,
+                            value=float(cen.get("nota_corte") or 0), step=1.0, key=f"cen_corte_{cid}")
+
+    d1, d2 = st.columns(2)
+    dist = d1.radio("Dentro de cada disciplina", list(DISTRIBUICOES), format_func=DISTRIBUICOES.get,
+                    index=list(DISTRIBUICOES).index(cen.get("distribuicao") or "igual"), key=f"cen_dist_{cid}")
+    agrupar = d2.checkbox("Agrupar por disciplina, na ordem do edital", value=cen.get("agrupar", True),
+                          key=f"cen_agr_{cid}", help="Desmarque para embaralhar todas as questões.")
+
+    st.markdown("**Disciplinas do edital** — uma linha por disciplina, indicando o bloco. Na prova, os "
+                "conhecimentos básicos vêm antes dos específicos; dentro de cada bloco vale a ordem da tabela.")
+    base = cen.get("disciplinas") or [{"disciplina": disciplinas[0] if disciplinas else "", "questoes": int(total),
+                                       "peso": 1.0, "minimo": 0.0, "bloco": BLOCOS[0]}]
+    df = pd.DataFrame([{"Bloco": _bloco_de(d), "Disciplina": d["disciplina"], "Questões": int(d.get("questoes") or 0),
+                        "Peso": float(d.get("peso") or 1), "Mínimo": float(d.get("minimo") or 0)} for d in base])
+    editado = st.data_editor(
+        df, key=f"cen_disc_{cid}", num_rows="dynamic", hide_index=True, width="stretch",
+        column_config={
+            "Bloco": st.column_config.SelectboxColumn(options=BLOCOS, required=True, default=BLOCOS[0]),
+            "Disciplina": st.column_config.SelectboxColumn(options=disciplinas, required=True),
+            "Questões": st.column_config.NumberColumn(min_value=0, step=1, required=True),
+            "Peso": st.column_config.NumberColumn(min_value=0.0, step=0.5, help="Pontos por questão"),
+            "Mínimo": st.column_config.NumberColumn(min_value=0.0, step=1.0,
+                                                    help="Nota líquida mínima na disciplina (0 = sem mínimo)"),
+        })
+
+    linhas = []
+    for _, r in editado.iterrows():
+        disc = r.get("Disciplina")
+        if isinstance(disc, str) and disc:
+            linhas.append({"disciplina": disc, "bloco": r.get("Bloco") if r.get("Bloco") in BLOCOS else BLOCOS[0],
+                           "questoes": int(r.get("Questões") or 0),
+                           "peso": float(r.get("Peso") or 1) if r.get("Peso") == r.get("Peso") else 1.0,
+                           "minimo": float(r.get("Mínimo") or 0) if r.get("Mínimo") == r.get("Mínimo") else 0.0})
+    soma = sum(l["questoes"] for l in linhas)
+    repetidas = {l["disciplina"] for l in linhas if [x["disciplina"] for x in linhas].count(l["disciplina"]) > 1}
+    maximo = sum(l["questoes"] * l["peso"] for l in linhas)
+
+    i1, i2, i3 = st.columns(3)
+    i1.metric("Soma das disciplinas", soma, delta=soma - int(total) if soma != total else None, delta_color="off")
+    i2.metric("Nota máxima", f"{maximo:g}")
+    i3.metric("Penalidade", f"−{fator:g} por errada" if penal else "Nenhuma")
+
+    st.markdown("**Blocos** — nota líquida mínima exigida em cada bloco (0 = sem mínimo)")
+    minimos_ant = cen.get("minimos_bloco") or {}
+    minimos_bloco = {}
+    for col, bloco in zip(st.columns(len(BLOCOS)), BLOCOS):
+        do_bloco = [l for l in linhas if l["bloco"] == bloco]
+        q_b = sum(l["questoes"] for l in do_bloco)
+        max_b = sum(l["questoes"] * l["peso"] for l in do_bloco)
+        with col:
+            minimos_bloco[bloco] = st.number_input(
+                f"{bloco} — {q_b} questões, máx. {max_b:g} pts", min_value=0.0,
+                value=float(minimos_ant.get(bloco) or 0), step=1.0, key=f"cen_minb_{cid}_{bloco}")
+
+    problemas = []
+    if not nome.strip():
+        problemas.append("Informe o nome do cenário.")
+    if soma != total:
+        problemas.append(f"A soma das disciplinas ({soma}) precisa ser igual ao total do edital ({int(total)}).")
+    if repetidas:
+        problemas.append("Disciplina repetida: " + ", ".join(sorted(repetidas)) + ".")
+    if not linhas:
+        problemas.append("Adicione ao menos uma disciplina.")
+    for p in problemas:
+        st.warning(p)
+
+    s1, s2 = st.columns(2)
+    if s1.button("💾 Salvar cenário", type="primary", disabled=bool(problemas), key=f"cen_salvar_{cid}"):
+        salvar_cenario({"nome": nome.strip(), "banca": banca.strip(), "tipo": tipo, "total": int(total),
+                        "tempo_limite_min": int(tempo), "penalidade": bool(penal),
+                        "fator_penalidade": float(fator), "nota_corte": float(corte),
+                        "minimos_bloco": {b: float(v) for b, v in minimos_bloco.items()},
+                        "distribuicao": dist, "agrupar": bool(agrupar), "disciplinas": linhas},
+                       cen.get("id"))
+        st.session_state.pop("cen_editando", None)
+        st.session_state["_cen_msg"] = "Cenário salvo."
+        st.rerun()
+    if s2.button("Cancelar", key=f"cen_cancelar_{cid}"):
+        st.session_state.pop("cen_editando", None)
+        st.rerun()
 
 
 # =============================
@@ -4439,7 +4949,8 @@ def main():
     if "go_to" in st.session_state:
         st.session_state["nav_choice"] = st.session_state.pop("go_to")
 
-    nav_pages = ["Painel", "Plano de Estudos", "Praticar", "Flashcards", "Gerenciar", "Importar CSV", "Simulados"]
+    nav_pages = ["Painel", "Plano de Estudos", "Praticar", "Flashcards", "Análise sintática", "Gerenciar",
+                 "Importar CSV", "Simulados", "Cenários de prova"]
     if is_admin():
         nav_pages.append("Usuários")
 
@@ -4455,6 +4966,10 @@ def main():
         page_praticar()
     elif choice == "Flashcards":
         flashcards.render_page(get_db(), login_atual())
+    elif choice == "Análise sintática":
+        sintaxe.render_page(get_db(), login_atual(), admin=is_admin())
+    elif choice == "Cenários de prova":
+        page_cenarios()
     elif choice == "Gerenciar":
         page_gerenciar()
     elif choice == "Importar CSV":
