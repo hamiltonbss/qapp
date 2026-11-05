@@ -2977,9 +2977,10 @@ def gerar_prova_cenario(cen):
 def _criar_prova_cenario(cen, pool, prova=None):
     """Abre a prova como simulado, com um retrato das regras do cenário (edições futuras
     do cenário não mudam o resultado de provas já feitas)."""
-    retrato = {k: cen.get(k) for k in ("nome", "banca", "tipo", "total", "disciplinas", "penalidade",
-                                       "fator_penalidade", "nota_corte", "minimos_bloco", "tempo_limite_min")}
-    meta = {"modo": "Cenário de prova", "cenario_id": cen["id"], "cenario": retrato,
+    retrato = {k: cen.get(k) for k in ("nome", "banca", "origem", "tipo", "total", "disciplinas", "penalidade",
+                                       "fator_penalidade", "nota_corte", "minimos_bloco", "pesos_bloco",
+                                       "tempo_limite_min")}
+    meta ={"modo": "Cenário de prova", "cenario_id": cen["id"], "cenario": retrato,
             "tempo_limite_min": int(cen.get("tempo_limite_min") or 0), "por_pagina": 0,
             "enviar_erros_caderno": True}
     nome = f"{cen['nome']} — {datetime.now(FUSO).strftime('%d/%m/%Y %H:%M')}"
@@ -3102,6 +3103,7 @@ def pontuacao_cenario(res, cfg):
     ordem = [d["disciplina"] for d in cfg.get("disciplinas") or []]
     # Provas importadas trazem bloco e disciplina de cada questão (sobrepõem os do questionário)
     mapa = cfg.get("mapa_questoes") or {}
+    pesos_bloco = cfg.get("pesos_bloco") or {}  # cenário de prova pronta: peso por bloco
     por = {}
     for r in res:
         m = mapa.get(str(r.get("questao_id"))) or {}
@@ -3120,7 +3122,7 @@ def pontuacao_cenario(res, cfg):
     eliminado_em = []
     for bloco, disc in sorted(por, key=lambda k: (BLOCOS.index(k[0]), ordem.index(k[1]) if k[1] in ordem else 99, k[1])):
         a, c = por[(bloco, disc)], conf.get(disc, {})
-        peso = float(c.get("peso") or 1)
+        peso = float(c.get("peso") or pesos_bloco.get(bloco) or 1)
         bruto = a["certas"] * peso
         desconto = fator * a["erradas"] * peso
         liq = bruto - desconto
@@ -3201,9 +3203,9 @@ def _cen_bloco_resultado(res, cfg):
 
 def page_cenarios():
     st.title("🏛️ Cenários de prova")
-    st.caption("Monte o cenário conforme o edital: total de questões, quantas por disciplina, pesos, "
-               "mínimos, nota de corte e a regra de que uma errada anula uma certa. "
-               "A prova gerada abre como um simulado e é corrigida no padrão do edital.")
+    st.caption("Monte o cenário conforme o edital: importe uma prova pronta (as disciplinas e os blocos vêm do "
+               "arquivo) ou defina quantas questões sortear de cada disciplina. Depois, configure pesos, mínimos, "
+               "nota de corte e a regra de que uma errada anula uma certa.")
     msg = st.session_state.pop("_cen_msg", None)
     if msg:
         st.success(msg)
@@ -3215,50 +3217,58 @@ def page_cenarios():
         _cen_formulario(get_cenario(editando) if editando else None)
         return
 
-    t1, t2 = st.tabs(["📋 Meus cenários", "➕ Novo cenário"])
-    with t1:
-        _cen_lista(cenarios)
-    with t2:
-        if st.button("Criar cenário", type="primary", key="cen_novo"):
-            st.session_state["cen_editando"] = ""
-            st.rerun()
-        st.caption("Dica: crie um cenário por concurso (ex.: 'TRF - Analista - Cespe 2026').")
+    if st.button("➕ Novo cenário", type="primary", key="cen_novo"):
+        st.session_state["cen_editando"] = ""
+        st.rerun()
+    _cen_lista(cenarios)
 
 
 def _cen_lista(cenarios):
     if not cenarios:
-        st.info("Nenhum cenário ainda. Use a aba **Novo cenário**.")
+        st.info("Nenhum cenário ainda. Clique em **Novo cenário** — você pode começar importando uma prova pronta.")
         return
     por_id = {c["id"]: c for c in cenarios}
     cid = st.selectbox("Cenário", list(por_id), format_func=lambda i: por_id[i]["nome"])
     cen = por_id[cid]
+    por_prova = (cen.get("origem") or "banco") == "prova"
+    provas = listar_provas_cenario(cid)
 
     regra = (f"uma errada anula {cen.get('fator_penalidade', 1):g} certa" if cen.get("penalidade")
              else "sem desconto por erro")
+    if por_prova:
+        tamanho = f"{len(provas)} prova(s) pronta(s)"
+        pesos = cen.get("pesos_bloco") or {}
+        if pesos:
+            tamanho += " · pesos " + " / ".join(f"{b.split()[-1]} {pesos.get(b, 1):g}" for b in BLOCOS)
+    else:
+        tamanho = f"{cen.get('total', 0)} questões sorteadas · {TIPOS_CENARIO.get(cen.get('tipo') or '', '')}"
+    minimos = cen.get("minimos_bloco") or {}
     st.markdown(
         f"**{esc(cen['nome'])}**" + (f" · {esc(cen.get('banca'))}" if cen.get("banca") else "")
-        + f"  \n{cen.get('total', 0)} questões · {TIPOS_CENARIO.get(cen.get('tipo') or '', '')} · {regra}"
+        + f"  \n{tamanho} · {regra}"
         + (f" · corte {cen['nota_corte']:g}" if cen.get("nota_corte") else "")
+        + "".join(f" · mín. {b.split()[-1]} {v:g}" for b, v in minimos.items() if v)
         + (f" · {cen['tempo_limite_min']} min" if cen.get("tempo_limite_min") else ""))
 
-    disp = disponibilidade_cenario(cen)
-    linhas = [{"Bloco": _bloco_de(d), "Disciplina": d["disciplina"], "Questões": d.get("questoes", 0),
-               "Peso": d.get("peso", 1),
-               "Mínimo": d.get("minimo") or None, "Disponíveis no banco": disp.get(d["disciplina"], 0)}
-              for d in cen.get("disciplinas") or []]
-    st.dataframe(linhas, width="stretch", hide_index=True)
-    faltam = [l["Disciplina"] for l in linhas if l["Disponíveis no banco"] < l["Questões"]]
-    if faltam:
-        st.warning("Banco insuficiente em: " + ", ".join(faltam) + ". A prova sairá com menos questões nelas.")
+    if not por_prova:
+        disp = disponibilidade_cenario(cen)
+        linhas = [{"Bloco": _bloco_de(d), "Disciplina": d["disciplina"], "Questões": d.get("questoes", 0),
+                   "Peso": d.get("peso", 1),
+                   "Mínimo": d.get("minimo") or None, "Disponíveis no banco": disp.get(d["disciplina"], 0)}
+                  for d in cen.get("disciplinas") or []]
+        st.dataframe(linhas, width="stretch", hide_index=True)
+        faltam = [l["Disciplina"] for l in linhas if l["Disponíveis no banco"] < l["Questões"]]
+        if faltam:
+            st.warning("Banco insuficiente em: " + ", ".join(faltam) + ". A prova sairá com menos questões nelas.")
 
     c1, c2, c3 = st.columns(3)
-    if c1.button("▶ Gerar prova", type="primary", key=f"cen_gerar_{cid}", width="stretch"):
+    if not por_prova and c1.button("▶ Gerar prova", type="primary", key=f"cen_gerar_{cid}", width="stretch"):
         sim_id = gerar_prova_cenario(cen)
         if sim_id:
             _abrir_simulado(sim_id)
             st.rerun()
         st.warning("Não há questões nas disciplinas deste cenário.")
-    if c2.button("✏️ Editar", key=f"cen_edit_{cid}", width="stretch"):
+    if c2.button("✏️ Editar regras", key=f"cen_edit_{cid}", width="stretch"):
         st.session_state["cen_editando"] = cid
         st.rerun()
     with c3:
@@ -3267,26 +3277,25 @@ def _cen_lista(cenarios):
             excluir_cenario(cid)
             st.rerun()
 
-    _cen_provas_importadas(cen)
+    _cen_provas_importadas(cen, provas, por_prova)
     _cen_historico(cen)
 
 
-def _cen_provas_importadas(cen):
+def _cen_provas_importadas(cen, provas, por_prova):
     cid = cen["id"]
     st.markdown("#### 📄 Provas prontas")
-    st.caption("Importe uma prova já pronta (ex.: prova anterior da banca) com as questões classificadas "
-               "em conhecimentos básicos e específicos. Ela é corrigida com as regras deste cenário.")
-    provas = listar_provas_cenario(cid)
+    if not por_prova:
+        st.caption("Opcional: importe também provas prontas para este cenário de sorteio.")
     for p in provas:
         pid = str(p["_id"])
         cont = {b: sum(1 for i in p["itens"] if i["bloco"] == b) for b in BLOCOS}
         discs = sorted({i["disciplina"] for i in p["itens"]})
-        fora = [d for d in discs if d not in {x["disciplina"] for x in cen.get("disciplinas") or []}]
         with st.container(border=True):
             st.markdown(f"**{esc(p['nome'])}** · {len(p['itens'])} questões · "
                         + " · ".join(f"{b}: {n}" for b, n in cont.items() if n))
             st.caption("Disciplinas: " + ", ".join(discs))
-            if fora:
+            fora = [d for d in discs if d not in {x["disciplina"] for x in cen.get("disciplinas") or []}]
+            if not por_prova and fora:
                 st.warning("Fora do cenário (peso 1, sem mínimo): " + ", ".join(fora)
                            + ". Use **Ajustar o cenário a esta prova** para incluí-las.")
             c1, c2, c3 = st.columns(3)
@@ -3296,9 +3305,10 @@ def _cen_provas_importadas(cen):
                     _abrir_simulado(sim_id)
                     st.rerun()
                 st.warning("As questões desta prova não existem mais no banco.")
-            if c2.button("🔧 Ajustar o cenário a esta prova", key=f"cen_ajustar_{pid}", width="stretch",
-                         help="Refaz a tabela de disciplinas (bloco e quantidade) com base na prova, "
-                              "mantendo pesos e mínimos já definidos."):
+            if not por_prova and c2.button("🔧 Ajustar o cenário a esta prova", key=f"cen_ajustar_{pid}",
+                                           width="stretch",
+                                           help="Refaz a tabela de disciplinas (bloco e quantidade) com base na "
+                                                "prova, mantendo pesos e mínimos já definidos."):
                 linhas = disciplinas_da_prova(p, cen)
                 salvar_cenario({"disciplinas": linhas, "total": sum(l["questoes"] for l in linhas)}, cid)
                 st.session_state["_cen_msg"] = "Cenário ajustado à prova. Confira pesos e mínimos em Editar."
@@ -3309,42 +3319,20 @@ def _cen_provas_importadas(cen):
                     get_db().cen_provas.delete_one({"_id": p["_id"], "usuario_login": login_atual()})
                     st.rerun()
 
-    with st.expander("📥 Importar prova pronta (CSV)", expanded=not provas):
-        st.code(MODELO_PROVA, language="text")
-        st.caption("Mesmo modelo da importação de questionários (tipo, questionario, disciplina, texto, correta, "
-                   "explicacao, alternativas separadas por @@), mais a coluna **bloco**: básico ou específico. "
-                   "Sem bloco, vale o bloco da disciplina no cenário. As questões também entram no banco, nos "
-                   "questionários indicados; enunciados que já existem são reaproveitados.")
-        nome = st.text_input("Nome da prova", key=f"cen_imp_nome_{cid}", placeholder="Ex.: TRF 2024 — prova aplicada")
-        up = st.file_uploader("Arquivo CSV", type=["csv"], key=f"cen_imp_up_{cid}")
-        txt = st.text_area("... ou cole aqui", height=140, key=f"cen_imp_txt_{cid}")
-        fonte = up.getvalue() if up is not None else (txt if txt.strip() else None)
-        if not fonte:
-            return
-        try:
-            linhas, erros = ler_prova_csv(fonte, cen)
-        except ValueError as e:
-            st.error(str(e))
-            return
-        resumo = {}
-        for l in linhas:
-            resumo[(l["bloco"], l["disciplina"])] = resumo.get((l["bloco"], l["disciplina"]), 0) + 1
-        st.caption(f"Prévia: {len(linhas)} questão(ões) válidas" + (f" · {len(erros)} com problema" if erros else ""))
-        if resumo:
-            st.dataframe([{"Bloco": b, "Disciplina": d, "Questões": n}
-                          for (b, d), n in sorted(resumo.items(), key=lambda kv: BLOCOS.index(kv[0][0]))],
-                         width="stretch", hide_index=True)
-        if erros:
-            with st.expander(f"⚠️ {len(erros)} linha(s) ignoradas"):
-                for e in erros[:100]:
-                    st.write("- ", e)
-        if st.button("📥 Importar prova", type="primary", key=f"cen_imp_btn_{cid}",
-                     disabled=not (linhas and nome.strip())):
-            gravar_prova_importada(cen, nome, linhas)
-            st.session_state["_cen_msg"] = f"Prova '{nome.strip()}' importada com {len(linhas)} questões."
-            st.rerun()
-        if linhas and not nome.strip():
-            st.caption("Dê um nome à prova para importar.")
+    rotulo = "📥 Importar outra prova" if provas else "📥 Importar prova pronta (CSV)"
+    if st.toggle(rotulo, value=not provas, key=f"cen_imp_toggle_{cid}"):
+        with st.container(border=True):
+            nome = st.text_input("Nome da prova", key=f"cen_imp_nome_{cid}", placeholder="Ex.: TRF 2024 — prova aplicada")
+            linhas = _cen_csv_entrada(f"cen_imp_{cid}", cen)
+            if st.button("📥 Importar prova", type="primary", key=f"cen_imp_btn_{cid}",
+                         disabled=not (linhas and nome.strip())):
+                gravar_prova_importada(cen, nome, linhas)
+                st.session_state["_cen_msg"] = f"Prova '{nome.strip()}' importada com {len(linhas)} questões."
+                st.rerun()
+            if not linhas:
+                st.caption("Envie o arquivo ou cole o CSV para liberar o botão.")
+            elif not nome.strip():
+                st.caption("Dê um nome à prova para importar.")
 
 
 def _cen_historico(cen):
@@ -3387,29 +3375,69 @@ def _cen_historico(cen):
                  width="stretch", hide_index=True)
 
 
+ORIGENS_CENARIO = {
+    "prova": "📄 Prova pronta (importar CSV)",
+    "banco": "🎲 Sortear do banco de questões",
+}
+
+
+def _cen_csv_entrada(prefixo, cen_like):
+    """Campos de envio do CSV da prova + prévia. Retorna as linhas válidas (ou [])."""
+    up = st.file_uploader("Arquivo CSV da prova", type=["csv"], key=f"{prefixo}_up")
+    txt = st.text_area("... ou cole aqui", height=140, key=f"{prefixo}_txt")
+    fonte = up.getvalue() if up is not None else (txt if txt.strip() else None)
+    with st.expander("📄 Ver modelo do CSV"):
+        st.code(MODELO_PROVA, language="text")
+        st.caption("Mesmo modelo da importação de questionários (tipo, questionario, disciplina, texto, correta, "
+                   "explicacao, alternativas separadas por @@), mais a coluna **bloco**: básico ou específico. "
+                   "As questões também entram no banco, nos questionários indicados; enunciados que já existem "
+                   "são reaproveitados.")
+    if not fonte:
+        return []
+    try:
+        linhas, erros = ler_prova_csv(fonte, cen_like)
+    except ValueError as e:
+        st.error(str(e))
+        return []
+    resumo = {}
+    for l in linhas:
+        resumo[(l["bloco"], l["disciplina"])] = resumo.get((l["bloco"], l["disciplina"]), 0) + 1
+    st.caption(f"Prévia: {len(linhas)} questão(ões) válidas" + (f" · {len(erros)} com problema" if erros else ""))
+    if resumo:
+        st.dataframe([{"Bloco": b, "Disciplina": d, "Questões": n}
+                      for (b, d), n in sorted(resumo.items(), key=lambda kv: BLOCOS.index(kv[0][0]))],
+                     width="stretch", hide_index=True)
+    if erros:
+        with st.expander(f"⚠️ {len(erros)} linha(s) ignoradas"):
+            for e in erros[:100]:
+                st.write("- ", e)
+    return linhas
+
+
 def _cen_formulario(cen):
     cen = cen or {}
     cid = cen.get("id", "novo")
     st.subheader("✏️ Editar cenário" if cen else "➕ Novo cenário")
-    disciplinas = [d for d in get_all_disciplinas() if d != SISTEMA]
 
-    a1, a2 = st.columns([2, 1])
+    if cen:
+        origem = cen.get("origem") or "banco"
+        st.caption(f"Origem das questões: {ORIGENS_CENARIO[origem]}")
+    else:
+        origem = st.radio("De onde vêm as questões?", list(ORIGENS_CENARIO), format_func=ORIGENS_CENARIO.get,
+                          horizontal=True, key="cen_origem",
+                          help="Prova pronta: as disciplinas, os blocos e o total saem do próprio CSV. "
+                               "Sorteio: você define quantas questões de cada disciplina, conforme o edital.")
+    por_prova = origem == "prova"
+
+    a1, a2, a3 = st.columns([2, 1, 1])
     nome = a1.text_input("Nome do cenário", value=cen.get("nome", ""), key=f"cen_nome_{cid}",
                          placeholder="Ex.: TRF 1ª Região — Analista Judiciário")
     banca = a2.text_input("Banca (opcional)", value=cen.get("banca", ""), key=f"cen_banca_{cid}")
-
-    b1, b2, b3 = st.columns(3)
-    tipos = list(TIPOS_CENARIO)
-    tipo = b1.selectbox("Tipo de questão", tipos, index=tipos.index(cen.get("tipo") or ""),
-                        format_func=TIPOS_CENARIO.get, key=f"cen_tipo_{cid}")
-    total = b2.number_input("Total de questões (edital)", min_value=1, max_value=500,
-                            value=int(cen.get("total") or 120), step=1, key=f"cen_total_{cid}")
-    tempo = b3.number_input("Tempo de prova (min, 0 = livre)", min_value=0, max_value=600,
+    tempo = a3.number_input("Tempo de prova (min, 0 = livre)", min_value=0, max_value=600,
                             value=int(cen.get("tempo_limite_min") or 0), step=10, key=f"cen_tempo_{cid}")
 
     c1, c2, c3 = st.columns(3)
-    penal = c1.toggle("Uma errada anula uma certa", value=bool(cen.get("penalidade", tipo == "VF")),
-                      key=f"cen_pen_{cid}")
+    penal = c1.toggle("Uma errada anula uma certa", value=bool(cen.get("penalidade", True)), key=f"cen_pen_{cid}")
     fator = c2.number_input("Cada errada desconta (questões certas)", min_value=0.0, max_value=2.0,
                             value=float(cen.get("fator_penalidade") or 1.0), step=0.25,
                             disabled=not penal, key=f"cen_fator_{cid}",
@@ -3418,80 +3446,131 @@ def _cen_formulario(cen):
     corte = c3.number_input("Nota de corte (pontos líquidos, 0 = sem corte)", min_value=0.0,
                             value=float(cen.get("nota_corte") or 0), step=1.0, key=f"cen_corte_{cid}")
 
-    d1, d2 = st.columns(2)
-    dist = d1.radio("Dentro de cada disciplina", list(DISTRIBUICOES), format_func=DISTRIBUICOES.get,
-                    index=list(DISTRIBUICOES).index(cen.get("distribuicao") or "igual"), key=f"cen_dist_{cid}")
-    agrupar = d2.checkbox("Agrupar por disciplina, na ordem do edital", value=cen.get("agrupar", True),
-                          key=f"cen_agr_{cid}", help="Desmarque para embaralhar todas as questões.")
-
-    st.markdown("**Disciplinas do edital** — uma linha por disciplina, indicando o bloco. Na prova, os "
-                "conhecimentos básicos vêm antes dos específicos; dentro de cada bloco vale a ordem da tabela.")
-    base = cen.get("disciplinas") or [{"disciplina": disciplinas[0] if disciplinas else "", "questoes": int(total),
-                                       "peso": 1.0, "minimo": 0.0, "bloco": BLOCOS[0]}]
-    df = pd.DataFrame([{"Bloco": _bloco_de(d), "Disciplina": d["disciplina"], "Questões": int(d.get("questoes") or 0),
-                        "Peso": float(d.get("peso") or 1), "Mínimo": float(d.get("minimo") or 0)} for d in base])
-    editado = st.data_editor(
-        df, key=f"cen_disc_{cid}", num_rows="dynamic", hide_index=True, width="stretch",
-        column_config={
-            "Bloco": st.column_config.SelectboxColumn(options=BLOCOS, required=True, default=BLOCOS[0]),
-            "Disciplina": st.column_config.SelectboxColumn(options=disciplinas, required=True),
-            "Questões": st.column_config.NumberColumn(min_value=0, step=1, required=True),
-            "Peso": st.column_config.NumberColumn(min_value=0.0, step=0.5, help="Pontos por questão"),
-            "Mínimo": st.column_config.NumberColumn(min_value=0.0, step=1.0,
-                                                    help="Nota líquida mínima na disciplina (0 = sem mínimo)"),
-        })
-
-    linhas = []
-    for _, r in editado.iterrows():
-        disc = r.get("Disciplina")
-        if isinstance(disc, str) and disc:
-            linhas.append({"disciplina": disc, "bloco": r.get("Bloco") if r.get("Bloco") in BLOCOS else BLOCOS[0],
-                           "questoes": int(r.get("Questões") or 0),
-                           "peso": float(r.get("Peso") or 1) if r.get("Peso") == r.get("Peso") else 1.0,
-                           "minimo": float(r.get("Mínimo") or 0) if r.get("Mínimo") == r.get("Mínimo") else 0.0})
-    soma = sum(l["questoes"] for l in linhas)
-    repetidas = {l["disciplina"] for l in linhas if [x["disciplina"] for x in linhas].count(l["disciplina"]) > 1}
-    maximo = sum(l["questoes"] * l["peso"] for l in linhas)
-
-    i1, i2, i3 = st.columns(3)
-    i1.metric("Soma das disciplinas", soma, delta=soma - int(total) if soma != total else None, delta_color="off")
-    i2.metric("Nota máxima", f"{maximo:g}")
-    i3.metric("Penalidade", f"−{fator:g} por errada" if penal else "Nenhuma")
-
-    st.markdown("**Blocos** — nota líquida mínima exigida em cada bloco (0 = sem mínimo)")
-    minimos_ant = cen.get("minimos_bloco") or {}
-    minimos_bloco = {}
-    for col, bloco in zip(st.columns(len(BLOCOS)), BLOCOS):
-        do_bloco = [l for l in linhas if l["bloco"] == bloco]
-        q_b = sum(l["questoes"] for l in do_bloco)
-        max_b = sum(l["questoes"] * l["peso"] for l in do_bloco)
-        with col:
-            minimos_bloco[bloco] = st.number_input(
-                f"{bloco} — {q_b} questões, máx. {max_b:g} pts", min_value=0.0,
-                value=float(minimos_ant.get(bloco) or 0), step=1.0, key=f"cen_minb_{cid}_{bloco}")
-
     problemas = []
+    linhas, prova_linhas, nome_prova = [], [], ""
+    tipo, total, dist, agrupar = cen.get("tipo") or "", int(cen.get("total") or 0), "igual", True
+
+    if por_prova:
+        # ---- disciplinas, blocos e total vêm do CSV ----
+        if not cen:
+            st.markdown("**Prova** — envie o CSV; disciplinas, blocos e total são lidos do arquivo.")
+            nome_prova = st.text_input("Nome da prova", key="cen_nova_prova_nome",
+                                       placeholder="Ex.: Prova aplicada em 2024 (opcional: usa o nome do cenário)")
+            prova_linhas = _cen_csv_entrada("cen_nova_prova", {"nome": nome or "Prova", "disciplinas": []})
+            if not prova_linhas:
+                problemas.append("Envie o CSV da prova.")
+            total = len(prova_linhas)
+        else:
+            st.caption("As provas deste cenário são gerenciadas na tela do cenário (importar outra, remover).")
+        contagem = {b: sum(1 for l in prova_linhas if l["bloco"] == b) for b in BLOCOS}
+        st.markdown("**Blocos** — peso de cada questão e nota líquida mínima (0 = sem mínimo)")
+        pesos_ant, minimos_ant = cen.get("pesos_bloco") or {}, cen.get("minimos_bloco") or {}
+        pesos_bloco, minimos_bloco = {}, {}
+        for col, bloco in zip(st.columns(len(BLOCOS)), BLOCOS):
+            with col:
+                rotulo = f"{bloco}" + (f" — {contagem[bloco]} questões" if prova_linhas else "")
+                st.markdown(f"*{rotulo}*")
+                pesos_bloco[bloco] = st.number_input("Peso por questão", min_value=0.0, step=0.5,
+                                                     value=float(pesos_ant.get(bloco) or 1.0),
+                                                     key=f"cen_pesob_{cid}_{bloco}")
+                minimos_bloco[bloco] = st.number_input("Mínimo (pontos líquidos)", min_value=0.0, step=1.0,
+                                                       value=float(minimos_ant.get(bloco) or 0),
+                                                       key=f"cen_minb_{cid}_{bloco}")
+        if prova_linhas:
+            maximo = sum(contagem[b] * pesos_bloco[b] for b in BLOCOS)
+            i1, i2, i3 = st.columns(3)
+            i1.metric("Questões na prova", total)
+            i2.metric("Nota máxima", f"{maximo:g}")
+            i3.metric("Penalidade", f"−{fator:g} por errada" if penal else "Nenhuma")
+    else:
+        # ---- sorteio do banco: disciplinas definidas conforme o edital ----
+        pesos_bloco = {}
+        disciplinas = [d for d in get_all_disciplinas() if d != SISTEMA]
+        b1, b2 = st.columns(2)
+        tipos = list(TIPOS_CENARIO)
+        tipo = b1.selectbox("Tipo de questão", tipos, index=tipos.index(cen.get("tipo") or ""),
+                            format_func=TIPOS_CENARIO.get, key=f"cen_tipo_{cid}")
+        total = b2.number_input("Total de questões (edital)", min_value=1, max_value=500,
+                                value=int(cen.get("total") or 120), step=1, key=f"cen_total_{cid}")
+        d1, d2 = st.columns(2)
+        dist = d1.radio("Dentro de cada disciplina", list(DISTRIBUICOES), format_func=DISTRIBUICOES.get,
+                        index=list(DISTRIBUICOES).index(cen.get("distribuicao") or "igual"), key=f"cen_dist_{cid}")
+        agrupar = d2.checkbox("Agrupar por disciplina, na ordem do edital", value=cen.get("agrupar", True),
+                              key=f"cen_agr_{cid}", help="Desmarque para embaralhar todas as questões.")
+
+        st.markdown("**Disciplinas do edital** — uma linha por disciplina, indicando o bloco. Na prova, os "
+                    "conhecimentos básicos vêm antes dos específicos; dentro de cada bloco vale a ordem da tabela.")
+        base = cen.get("disciplinas") or [{"disciplina": disciplinas[0] if disciplinas else "", "questoes": int(total),
+                                           "peso": 1.0, "minimo": 0.0, "bloco": BLOCOS[0]}]
+        df = pd.DataFrame([{"Bloco": _bloco_de(d), "Disciplina": d["disciplina"], "Questões": int(d.get("questoes") or 0),
+                            "Peso": float(d.get("peso") or 1), "Mínimo": float(d.get("minimo") or 0)} for d in base])
+        editado = st.data_editor(
+            df, key=f"cen_disc_{cid}", num_rows="dynamic", hide_index=True, width="stretch",
+            column_config={
+                "Bloco": st.column_config.SelectboxColumn(options=BLOCOS, required=True, default=BLOCOS[0]),
+                "Disciplina": st.column_config.SelectboxColumn(options=disciplinas, required=True),
+                "Questões": st.column_config.NumberColumn(min_value=0, step=1, required=True),
+                "Peso": st.column_config.NumberColumn(min_value=0.0, step=0.5, help="Pontos por questão"),
+                "Mínimo": st.column_config.NumberColumn(min_value=0.0, step=1.0,
+                                                        help="Nota líquida mínima na disciplina (0 = sem mínimo)"),
+            })
+        for _, r in editado.iterrows():
+            disc = r.get("Disciplina")
+            if isinstance(disc, str) and disc:
+                linhas.append({"disciplina": disc, "bloco": r.get("Bloco") if r.get("Bloco") in BLOCOS else BLOCOS[0],
+                               "questoes": int(r.get("Questões") or 0),
+                               "peso": float(r.get("Peso") or 1) if r.get("Peso") == r.get("Peso") else 1.0,
+                               "minimo": float(r.get("Mínimo") or 0) if r.get("Mínimo") == r.get("Mínimo") else 0.0})
+        soma = sum(l["questoes"] for l in linhas)
+        repetidas = {l["disciplina"] for l in linhas if [x["disciplina"] for x in linhas].count(l["disciplina"]) > 1}
+        i1, i2, i3 = st.columns(3)
+        i1.metric("Soma das disciplinas", soma, delta=soma - int(total) if soma != total else None, delta_color="off")
+        i2.metric("Nota máxima", f"{sum(l['questoes'] * l['peso'] for l in linhas):g}")
+        i3.metric("Penalidade", f"−{fator:g} por errada" if penal else "Nenhuma")
+
+        st.markdown("**Blocos** — nota líquida mínima exigida em cada bloco (0 = sem mínimo)")
+        minimos_ant = cen.get("minimos_bloco") or {}
+        minimos_bloco = {}
+        for col, bloco in zip(st.columns(len(BLOCOS)), BLOCOS):
+            do_bloco = [l for l in linhas if l["bloco"] == bloco]
+            with col:
+                minimos_bloco[bloco] = st.number_input(
+                    f"{bloco} — {sum(l['questoes'] for l in do_bloco)} questões, "
+                    f"máx. {sum(l['questoes'] * l['peso'] for l in do_bloco):g} pts", min_value=0.0,
+                    value=float(minimos_ant.get(bloco) or 0), step=1.0, key=f"cen_minb_{cid}_{bloco}")
+
+        if soma != total:
+            problemas.append(f"A soma das disciplinas ({soma}) precisa ser igual ao total do edital ({int(total)}).")
+        if repetidas:
+            problemas.append("Disciplina repetida: " + ", ".join(sorted(repetidas)) + ".")
+        if not linhas:
+            problemas.append("Adicione ao menos uma disciplina.")
+
     if not nome.strip():
-        problemas.append("Informe o nome do cenário.")
-    if soma != total:
-        problemas.append(f"A soma das disciplinas ({soma}) precisa ser igual ao total do edital ({int(total)}).")
-    if repetidas:
-        problemas.append("Disciplina repetida: " + ", ".join(sorted(repetidas)) + ".")
-    if not linhas:
-        problemas.append("Adicione ao menos uma disciplina.")
+        problemas.insert(0, "Informe o nome do cenário.")
     for p in problemas:
         st.warning(p)
 
     s1, s2 = st.columns(2)
     if s1.button("💾 Salvar cenário", type="primary", disabled=bool(problemas), key=f"cen_salvar_{cid}"):
-        salvar_cenario({"nome": nome.strip(), "banca": banca.strip(), "tipo": tipo, "total": int(total),
-                        "tempo_limite_min": int(tempo), "penalidade": bool(penal),
-                        "fator_penalidade": float(fator), "nota_corte": float(corte),
-                        "minimos_bloco": {b: float(v) for b, v in minimos_bloco.items()},
-                        "distribuicao": dist, "agrupar": bool(agrupar), "disciplinas": linhas},
-                       cen.get("id"))
+        dados = {"nome": nome.strip(), "banca": banca.strip(), "origem": origem, "tipo": tipo,
+                 "tempo_limite_min": int(tempo), "penalidade": bool(penal), "fator_penalidade": float(fator),
+                 "nota_corte": float(corte), "minimos_bloco": {b: float(v) for b, v in minimos_bloco.items()},
+                 "pesos_bloco": {b: float(v) for b, v in pesos_bloco.items()}}
+        if por_prova:
+            if not cen:
+                dados["total"] = int(total)
+        else:
+            dados.update({"total": int(total), "distribuicao": dist, "agrupar": bool(agrupar), "disciplinas": linhas})
+        novo_id = salvar_cenario(dados, cen.get("id"))
+        msg = "Cenário salvo."
+        if prova_linhas:
+            gravar_prova_importada({**dados, "id": novo_id}, nome_prova.strip() or nome.strip(), prova_linhas)
+            msg = f"Cenário criado com a prova importada ({len(prova_linhas)} questões)."
+        for k in ("cen_nova_prova_up", "cen_nova_prova_txt", "cen_nova_prova_nome", "cen_nome_novo"):
+            st.session_state.pop(k, None)  # o próximo "Novo cenário" começa em branco
         st.session_state.pop("cen_editando", None)
-        st.session_state["_cen_msg"] = "Cenário salvo."
+        st.session_state["_cen_msg"] = msg
         st.rerun()
     if s2.button("Cancelar", key=f"cen_cancelar_{cid}"):
         st.session_state.pop("cen_editando", None)
