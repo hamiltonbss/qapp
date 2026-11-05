@@ -370,6 +370,7 @@ def _init_db_once():
         lambda: flashcards.init_indexes(db),
         lambda: sintaxe.init_indexes(db),
         lambda: db.cenarios.create_index([("usuario_login", ASCENDING), ("nome", ASCENDING)], name="idx_cenarios"),
+        lambda: db.cen_provas.create_index([("usuario_login", ASCENDING), ("cenario_id", ASCENDING)], name="idx_cen_provas"),
         lambda: db.simulados.create_index([("usuario_login", ASCENDING), ("meta.cenario_id", ASCENDING)],
                                           name="idx_sim_cenario"),
         lambda: db.questionarios.update_many(
@@ -1012,20 +1013,16 @@ def processar_texto(texto):
     return texto
 
 
-def import_csv_to_db(filelike_or_str):
-    """Retorna (importadas, erros, duplicadas_ignoradas, por_questionario).
-    por_questionario: {qid: {"nome", "novas", "duplicadas", "criado"}}."""
-    if hasattr(filelike_or_str, "read"):
-        content = filelike_or_str.read()
-        if isinstance(content, bytes):
-            try:
-                txt = content.decode("utf-8-sig")  # aceita BOM do Excel
-            except Exception:
-                txt = content.decode("latin-1")
-        else:
-            txt = str(content)
+def _csv_dict_reader(src, required=("tipo", "questionario", "texto", "correta")):
+    """DictReader do CSV de questões (arquivo, bytes ou texto), com cabeçalho normalizado."""
+    content = src.read() if hasattr(src, "read") else src
+    if isinstance(content, bytes):
+        try:
+            txt = content.decode("utf-8-sig")  # aceita BOM do Excel
+        except Exception:
+            txt = content.decode("latin-1")
     else:
-        txt = str(filelike_or_str)
+        txt = str(content)
     txt = txt.lstrip("﻿")
 
     sample = txt[:2048]
@@ -1038,11 +1035,16 @@ def import_csv_to_db(filelike_or_str):
     if not reader.fieldnames:
         raise ValueError("CSV vazio ou sem cabeçalho.")
     reader.fieldnames = [(f or "").strip().lstrip("﻿").lower() for f in reader.fieldnames]
-    required = {"tipo", "questionario", "texto", "correta"}
     missing = [r for r in required if r not in reader.fieldnames]
     if missing:
         raise ValueError(f"CSV sem colunas obrigatórias: {missing}. Cabeçalho encontrado: {reader.fieldnames}")
+    return reader
 
+
+def import_csv_to_db(filelike_or_str):
+    """Retorna (importadas, erros, duplicadas_ignoradas, por_questionario).
+    por_questionario: {qid: {"nome", "novas", "duplicadas", "criado"}}."""
+    reader = _csv_dict_reader(filelike_or_str)
     db = get_db()
     ids_por_nome = {}
     textos_existentes = {}
@@ -2939,6 +2941,7 @@ def salvar_cenario(dados, cen_id=None, login=None):
 
 def excluir_cenario(cen_id):
     get_db().cenarios.delete_one({"_id": _oid(cen_id), "usuario_login": login_atual()})
+    get_db().cen_provas.delete_many({"cenario_id": str(cen_id), "usuario_login": login_atual()})
 
 
 def disponibilidade_cenario(cen):
@@ -2968,13 +2971,127 @@ def gerar_prova_cenario(cen):
         random.shuffle(pool)
     if not pool:
         return None
+    return _criar_prova_cenario(cen, pool)
+
+
+def _criar_prova_cenario(cen, pool, prova=None):
+    """Abre a prova como simulado, com um retrato das regras do cenário (edições futuras
+    do cenário não mudam o resultado de provas já feitas)."""
     retrato = {k: cen.get(k) for k in ("nome", "banca", "tipo", "total", "disciplinas", "penalidade",
                                        "fator_penalidade", "nota_corte", "minimos_bloco", "tempo_limite_min")}
-    return create_simulado(
-        f"{cen['nome']} — {datetime.now(FUSO).strftime('%d/%m/%Y %H:%M')}", pool,
-        meta={"modo": "Cenário de prova", "cenario_id": cen["id"], "cenario": retrato,
-              "tempo_limite_min": int(cen.get("tempo_limite_min") or 0), "por_pagina": 0,
-              "enviar_erros_caderno": True})
+    meta = {"modo": "Cenário de prova", "cenario_id": cen["id"], "cenario": retrato,
+            "tempo_limite_min": int(cen.get("tempo_limite_min") or 0), "por_pagina": 0,
+            "enviar_erros_caderno": True}
+    nome = f"{cen['nome']} — {datetime.now(FUSO).strftime('%d/%m/%Y %H:%M')}"
+    if prova:
+        retrato["mapa_questoes"] = {i["questao_id"]: {"bloco": i["bloco"], "disciplina": i["disciplina"]}
+                                    for i in prova["itens"]}
+        meta.update({"prova_id": str(prova["_id"]), "prova_nome": prova["nome"]})
+        nome = f"{cen['nome']} — {prova['nome']}"
+    return create_simulado(nome, pool, meta=meta)
+
+
+# ---- Provas prontas importadas (CSV no modelo dos questionários + coluna 'bloco') ----
+MODELO_PROVA = """tipo;questionario;disciplina;bloco;texto;correta;explicacao;alternativas
+VF;TRF 2024 - Português;Língua Portuguesa;básico;A vírgula após "Ontem" é facultativa.;V;Adjunto adverbial curto anteposto.;
+MC;TRF 2024 - Português;Língua Portuguesa;básico;Assinale a alternativa correta quanto à regência.;B;O verbo assistir (ver) é transitivo indireto.;Assisti o filme@@Assisti ao filme@@Assisti no filme@@Assisti pelo filme
+VF;TRF 2024 - Dir. Administrativo;Direito Administrativo;específico;O ato vinculado admite juízo de conveniência.;F;No ato vinculado não há mérito administrativo.;"""
+
+
+def _normalizar_bloco(valor, disciplina, cen):
+    s = str(valor or "").strip().lower()
+    if s in ("b", "cb", "1") or any(p in s for p in ("básic", "basic", "gera")):
+        return BLOCOS[0]
+    if s in ("e", "ce", "2") or any(p in s for p in ("específ", "especif", "espec")):
+        return BLOCOS[1]
+    if s:
+        return None
+    conf = next((d for d in cen.get("disciplinas") or [] if d["disciplina"] == disciplina), {})
+    return _bloco_de(conf)  # sem bloco: usa o do cenário para a disciplina (ou básicos)
+
+
+def ler_prova_csv(src, cen):
+    """Valida o CSV da prova sem gravar nada. Retorna (linhas, erros) — linhas na ordem do arquivo."""
+    reader = _csv_dict_reader(src)
+    linhas, erros = [], []
+    for i, row in enumerate(reader, start=2):
+        try:
+            tipo = (row.get("tipo") or "").strip().upper()
+            disciplina = (row.get("disciplina") or "").strip() or "Sem Disciplina"
+            questionario = (row.get("questionario") or "").strip() or f"{cen['nome']} - {disciplina}"
+            texto = processar_texto((row.get("texto") or "").strip())
+            correta = (row.get("correta") or "").strip()
+            if not texto:
+                raise ValueError("texto da questão vazio")
+            if tipo not in ("VF", "MC"):
+                raise ValueError("tipo deve ser 'VF' ou 'MC'")
+            alternativas = [processar_texto(a) for a in parse_alternativas(row.get("alternativas"))]
+            if tipo == "MC" and len(alternativas) < 2:
+                raise ValueError("questão MC requer ao menos 2 alternativas (separadas por @@)")
+            if not correta:
+                raise ValueError("gabarito (correta) vazio")
+            bloco = _normalizar_bloco(row.get("bloco"), disciplina, cen)
+            if not bloco:
+                raise ValueError(f"bloco '{row.get('bloco')}' inválido (use básico ou específico)")
+            linhas.append({"tipo": tipo, "questionario": questionario, "disciplina": disciplina, "bloco": bloco,
+                           "texto": texto, "correta": correta, "alternativas": alternativas,
+                           "explicacao": processar_texto(row.get("explicacao") or "")})
+        except Exception as e:
+            erros.append(f"Linha {i}: {e}")
+    return linhas, erros
+
+
+def gravar_prova_importada(cen, nome, linhas):
+    """Grava as questões no banco (questionários do CSV, como na importação comum) e registra a
+    prova no cenário. Questões com o mesmo enunciado já existentes são reaproveitadas."""
+    db = get_db()
+    ids_q, textos, itens = {}, {}, []
+    for l in linhas:
+        if l["questionario"] not in ids_q:
+            ids_q[l["questionario"]] = ensure_questionario(l["questionario"], l["disciplina"])
+            oid = ObjectId(ids_q[l["questionario"]])
+            textos[ids_q[l["questionario"]]] = {d["texto"]: str(d["_id"]) for d in
+                                                 db.questoes.find({"questionario_id": oid}, {"texto": 1})}
+        qid = ids_q[l["questionario"]]
+        questao_id = textos[qid].get(l["texto"])
+        if not questao_id:
+            doc = (montar_questao_vf(qid, l["texto"], normalize_bool(l["correta"]), l["explicacao"])
+                   if l["tipo"] == "VF" else
+                   montar_questao_mc(qid, l["texto"], l["alternativas"], l["correta"], l["explicacao"]))
+            questao_id = str(db.questoes.insert_one(doc).inserted_id)
+            textos[qid][l["texto"]] = questao_id
+        itens.append({"questao_id": questao_id, "bloco": l["bloco"], "disciplina": l["disciplina"]})
+    get_questionarios.clear()
+    contar_questoes_por_questionario.clear()
+    return str(db.cen_provas.insert_one({
+        "cenario_id": cen["id"], "usuario_login": login_atual(), "nome": nome.strip(),
+        "itens": itens, "criado_em": _now_iso()}).inserted_id)
+
+
+def listar_provas_cenario(cen_id):
+    return list(get_db().cen_provas.find({"cenario_id": cen_id, "usuario_login": login_atual()})
+                .sort("criado_em", ASCENDING))
+
+
+def fazer_prova_importada(cen, prova):
+    """Básicos antes dos específicos, mantendo a ordem do arquivo dentro de cada bloco."""
+    existentes = get_questoes_by_ids([i["questao_id"] for i in prova["itens"]])
+    itens = sorted((i for i in prova["itens"] if i["questao_id"] in existentes),
+                   key=lambda i: BLOCOS.index(i["bloco"]) if i["bloco"] in BLOCOS else 0)
+    if not itens:
+        return None
+    return _criar_prova_cenario(cen, [i["questao_id"] for i in itens], {**prova, "itens": itens})
+
+
+def disciplinas_da_prova(prova, cen):
+    """Tabela de disciplinas do cenário refeita a partir da prova (mantém pesos e mínimos)."""
+    atuais = {d["disciplina"]: d for d in cen.get("disciplinas") or []}
+    cont = {}
+    for i in prova["itens"]:
+        cont[(i["bloco"], i["disciplina"])] = cont.get((i["bloco"], i["disciplina"]), 0) + 1
+    return [{"disciplina": d, "bloco": b, "questoes": n,
+             "peso": float(atuais.get(d, {}).get("peso") or 1), "minimo": float(atuais.get(d, {}).get("minimo") or 0)}
+            for (b, d), n in sorted(cont.items(), key=lambda kv: BLOCOS.index(kv[0][0]))]
 
 
 def pontuacao_cenario(res, cfg):
@@ -2983,9 +3100,14 @@ def pontuacao_cenario(res, cfg):
     fator = float(cfg.get("fator_penalidade") or 0) if cfg.get("penalidade") else 0.0
     conf = {d["disciplina"]: d for d in cfg.get("disciplinas") or []}
     ordem = [d["disciplina"] for d in cfg.get("disciplinas") or []]
+    # Provas importadas trazem bloco e disciplina de cada questão (sobrepõem os do questionário)
+    mapa = cfg.get("mapa_questoes") or {}
     por = {}
     for r in res:
-        a = por.setdefault(r.get("disciplina") or "Sem Disciplina", {"n": 0, "certas": 0, "erradas": 0, "branco": 0})
+        m = mapa.get(str(r.get("questao_id"))) or {}
+        disc = m.get("disciplina") or r.get("disciplina") or "Sem Disciplina"
+        bloco = m.get("bloco") if m.get("bloco") in BLOCOS else _bloco_de(conf.get(disc, {}))
+        a = por.setdefault((bloco, disc), {"n": 0, "certas": 0, "erradas": 0, "branco": 0})
         a["n"] += 1
         if r.get("acertou"):
             a["certas"] += 1
@@ -2996,8 +3118,8 @@ def pontuacao_cenario(res, cfg):
 
     linhas, tot = [], {"liq": 0.0, "max": 0.0, "bruto": 0.0, "desconto": 0.0}
     eliminado_em = []
-    for disc in sorted(por, key=lambda d: (ordem.index(d) if d in ordem else 99, d)):
-        a, c = por[disc], conf.get(disc, {})
+    for bloco, disc in sorted(por, key=lambda k: (BLOCOS.index(k[0]), ordem.index(k[1]) if k[1] in ordem else 99, k[1])):
+        a, c = por[(bloco, disc)], conf.get(disc, {})
         peso = float(c.get("peso") or 1)
         bruto = a["certas"] * peso
         desconto = fator * a["erradas"] * peso
@@ -3006,7 +3128,7 @@ def pontuacao_cenario(res, cfg):
         ok = liq >= minimo if minimo else True
         if not ok:
             eliminado_em.append(disc)
-        linhas.append({"Bloco": _bloco_de(c), "Disciplina": disc, "Questões": a["n"], "Peso": peso, "Certas": a["certas"],
+        linhas.append({"Bloco": bloco, "Disciplina": disc, "Questões": a["n"], "Peso": peso, "Certas": a["certas"],
                        "Erradas": a["erradas"], "Em branco": a["branco"], "Pontos brutos": round(bruto, 2),
                        "Desconto": round(-desconto, 2), "Nota líquida": round(liq, 2),
                        "Máximo": round(a["n"] * peso, 2), "Mínimo": minimo or None,
@@ -3145,7 +3267,84 @@ def _cen_lista(cenarios):
             excluir_cenario(cid)
             st.rerun()
 
+    _cen_provas_importadas(cen)
     _cen_historico(cen)
+
+
+def _cen_provas_importadas(cen):
+    cid = cen["id"]
+    st.markdown("#### 📄 Provas prontas")
+    st.caption("Importe uma prova já pronta (ex.: prova anterior da banca) com as questões classificadas "
+               "em conhecimentos básicos e específicos. Ela é corrigida com as regras deste cenário.")
+    provas = listar_provas_cenario(cid)
+    for p in provas:
+        pid = str(p["_id"])
+        cont = {b: sum(1 for i in p["itens"] if i["bloco"] == b) for b in BLOCOS}
+        discs = sorted({i["disciplina"] for i in p["itens"]})
+        fora = [d for d in discs if d not in {x["disciplina"] for x in cen.get("disciplinas") or []}]
+        with st.container(border=True):
+            st.markdown(f"**{esc(p['nome'])}** · {len(p['itens'])} questões · "
+                        + " · ".join(f"{b}: {n}" for b, n in cont.items() if n))
+            st.caption("Disciplinas: " + ", ".join(discs))
+            if fora:
+                st.warning("Fora do cenário (peso 1, sem mínimo): " + ", ".join(fora)
+                           + ". Use **Ajustar o cenário a esta prova** para incluí-las.")
+            c1, c2, c3 = st.columns(3)
+            if c1.button("▶ Fazer esta prova", type="primary", key=f"cen_fazer_{pid}", width="stretch"):
+                sim_id = fazer_prova_importada(cen, p)
+                if sim_id:
+                    _abrir_simulado(sim_id)
+                    st.rerun()
+                st.warning("As questões desta prova não existem mais no banco.")
+            if c2.button("🔧 Ajustar o cenário a esta prova", key=f"cen_ajustar_{pid}", width="stretch",
+                         help="Refaz a tabela de disciplinas (bloco e quantidade) com base na prova, "
+                              "mantendo pesos e mínimos já definidos."):
+                linhas = disciplinas_da_prova(p, cen)
+                salvar_cenario({"disciplinas": linhas, "total": sum(l["questoes"] for l in linhas)}, cid)
+                st.session_state["_cen_msg"] = "Cenário ajustado à prova. Confira pesos e mínimos em Editar."
+                st.rerun()
+            with c3:
+                if botao_confirmado("🗑️ Remover prova", key=f"cen_delp_{pid}",
+                                    mensagem="Remover esta prova do cenário? As questões continuam no banco."):
+                    get_db().cen_provas.delete_one({"_id": p["_id"], "usuario_login": login_atual()})
+                    st.rerun()
+
+    with st.expander("📥 Importar prova pronta (CSV)", expanded=not provas):
+        st.code(MODELO_PROVA, language="text")
+        st.caption("Mesmo modelo da importação de questionários (tipo, questionario, disciplina, texto, correta, "
+                   "explicacao, alternativas separadas por @@), mais a coluna **bloco**: básico ou específico. "
+                   "Sem bloco, vale o bloco da disciplina no cenário. As questões também entram no banco, nos "
+                   "questionários indicados; enunciados que já existem são reaproveitados.")
+        nome = st.text_input("Nome da prova", key=f"cen_imp_nome_{cid}", placeholder="Ex.: TRF 2024 — prova aplicada")
+        up = st.file_uploader("Arquivo CSV", type=["csv"], key=f"cen_imp_up_{cid}")
+        txt = st.text_area("... ou cole aqui", height=140, key=f"cen_imp_txt_{cid}")
+        fonte = up.getvalue() if up is not None else (txt if txt.strip() else None)
+        if not fonte:
+            return
+        try:
+            linhas, erros = ler_prova_csv(fonte, cen)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        resumo = {}
+        for l in linhas:
+            resumo[(l["bloco"], l["disciplina"])] = resumo.get((l["bloco"], l["disciplina"]), 0) + 1
+        st.caption(f"Prévia: {len(linhas)} questão(ões) válidas" + (f" · {len(erros)} com problema" if erros else ""))
+        if resumo:
+            st.dataframe([{"Bloco": b, "Disciplina": d, "Questões": n}
+                          for (b, d), n in sorted(resumo.items(), key=lambda kv: BLOCOS.index(kv[0][0]))],
+                         width="stretch", hide_index=True)
+        if erros:
+            with st.expander(f"⚠️ {len(erros)} linha(s) ignoradas"):
+                for e in erros[:100]:
+                    st.write("- ", e)
+        if st.button("📥 Importar prova", type="primary", key=f"cen_imp_btn_{cid}",
+                     disabled=not (linhas and nome.strip())):
+            gravar_prova_importada(cen, nome, linhas)
+            st.session_state["_cen_msg"] = f"Prova '{nome.strip()}' importada com {len(linhas)} questões."
+            st.rerun()
+        if linhas and not nome.strip():
+            st.caption("Dê um nome à prova para importar.")
 
 
 def _cen_historico(cen):
@@ -3163,7 +3362,9 @@ def _cen_historico(cen):
         p = pontuacao_cenario(res, (d.get("meta") or {}).get("cenario") or cen)
         for b in p["blocos"]:
             por_bloco.setdefault(b["Bloco"], []).append(b["% da máxima"])
-        hist.append({"Data": _fmt_dt(d.get("finished_at")), "Nota líquida": round(p["liquida"], 2),
+        hist.append({"Data": _fmt_dt(d.get("finished_at")),
+                     "Prova": (d.get("meta") or {}).get("prova_nome") or "Sorteada do banco",
+                     "Nota líquida": round(p["liquida"], 2),
                      "Máximo": p["maximo"], "% da máxima": round(p["perc"], 1),
                      **{f"{b['Bloco']} (líq.)": b["Nota líquida"] for b in p["blocos"]},
                      "Desconto por erros": round(-p["desconto"], 2), "Situação": p["situacao"]})
