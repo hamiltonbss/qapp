@@ -18,6 +18,7 @@ from bson import ObjectId
 
 import flashcards  # módulos separados (na mesma pasta do app.py)
 import sintaxe
+import discursivas
 
 try:
     import bcrypt
@@ -369,6 +370,7 @@ def _init_db_once():
         lambda: db.flashcards.create_index([("item_id", ASCENDING)]),
         lambda: flashcards.init_indexes(db),
         lambda: sintaxe.init_indexes(db),
+        lambda: discursivas.init_indexes(db),
         lambda: db.cenarios.create_index([("usuario_login", ASCENDING), ("nome", ASCENDING)], name="idx_cenarios"),
         lambda: db.cen_provas.create_index([("usuario_login", ASCENDING), ("cenario_id", ASCENDING)], name="idx_cen_provas"),
         lambda: db.simulados.create_index([("usuario_login", ASCENDING), ("meta.cenario_id", ASCENDING)],
@@ -5229,7 +5231,7 @@ def main():
     if "go_to" in st.session_state:
         st.session_state["nav_choice"] = st.session_state.pop("go_to")
 
-    nav_pages = ["Painel", "Plano de Estudos", "Praticar", "Flashcards", "Análise sintática", "Gerenciar",
+    nav_pages = ["Painel", "Plano de Estudos", "Praticar", "Flashcards", "Análise sintática", "Discursivas", "Gerenciar",
                  "Importar CSV", "Simulados", "Cenários de prova"]
     if is_admin():
         nav_pages.append("Usuários")
@@ -5248,6 +5250,8 @@ def main():
         flashcards.render_page(get_db(), login_atual())
     elif choice == "Análise sintática":
         sintaxe.render_page(get_db(), login_atual(), admin=is_admin())
+    elif choice == "Discursivas":
+        discursivas.render_page(get_db(), login_atual())
     elif choice == "Cenários de prova":
         page_cenarios()
     elif choice == "Gerenciar":
