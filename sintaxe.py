@@ -318,6 +318,11 @@ def importar(db, exercicios, novos_rotulos, login):
 def prompt_llm(grupo, camadas, quantidade, extras_por_camada):
     listas = "\n".join(f"  {c}: " + ", ".join(extras_por_camada[c]) for c in camadas)
     nomes_camadas = ", ".join(camadas)
+    dica_geral = ("- Inclua casos que costumam confundir: complemento nominal × adjunto adnominal, objeto indireto × "
+                  "complemento nominal, adjetiva restritiva × explicativa, vírgulas proibidas."
+                  if any(not c.startswith("verbo_") for c in camadas) else
+                  "- Inclua casos que costumam confundir: tempos simples × compostos, presente com valor de futuro, "
+                  "futuro do pretérito de hipótese × de incerteza, passiva sintética × índice de indeterminação.")
     dica_verbos = ""
     if any(c.startswith("verbo_") for c in camadas):
         dica_verbos = (
@@ -344,7 +349,7 @@ FORMATO (obrigatório):
 
 CONTEÚDO:
 - Gere {quantidade} orações com 1 a 3 destaques cada, em estilo de prova de concurso.
-- Inclua casos que costumam confundir: complemento nominal × adjunto adnominal, objeto indireto × complemento nominal, adjetiva restritiva × explicativa, vírgulas proibidas.
+{dica_geral}
 - Se uma classificação for discutível entre gramáticos, use a coluna "aceitas" e explique.{dica_verbos}"""
 
 
