@@ -17,12 +17,19 @@ import io
 import random
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import ASCENDING
+
+try:
+    from zoneinfo import ZoneInfo
+    FUSO = ZoneInfo("America/Sao_Paulo")
+except Exception:
+    FUSO = timezone.utc
 
 # =============================
 # Classificações (NGB)
@@ -32,8 +39,12 @@ CAMADAS = {
     "sintaxe": "Função sintática do termo destacado",
     "oracoes": "Classificação da oração destacada",
     "pontuacao": "Justificativa da vírgula destacada",
+    "verbo_tempo": "Modo e tempo da forma verbal destacada",
+    "verbo_voz": "Voz da forma verbal destacada",
+    "verbo_valor": "Valor (emprego) da forma verbal destacada",
 }
-NOMES_CAMADA = {"morfologia": "Morfologia", "sintaxe": "Sintaxe", "oracoes": "Orações", "pontuacao": "Pontuação"}
+NOMES_CAMADA = {"morfologia": "Morfologia", "sintaxe": "Sintaxe", "oracoes": "Orações", "pontuacao": "Pontuação",
+                "verbo_tempo": "Verbo: modo e tempo", "verbo_voz": "Verbo: voz", "verbo_valor": "Verbo: valor"}
 
 ROTULOS = {
     "morfologia": [
@@ -77,6 +88,31 @@ ROTULOS = {
         "Incorreta: separa nome e complemento", "Incorreta: isola oração adjetiva restritiva",
         "Incorreta: separa oração principal da substantiva",
     ],
+    "verbo_tempo": [
+        "Presente do indicativo", "Pretérito perfeito do indicativo", "Pretérito imperfeito do indicativo",
+        "Pretérito mais-que-perfeito do indicativo", "Futuro do presente do indicativo",
+        "Futuro do pretérito do indicativo", "Presente do subjuntivo", "Pretérito imperfeito do subjuntivo",
+        "Futuro do subjuntivo", "Imperativo afirmativo", "Imperativo negativo",
+        "Pretérito perfeito composto do indicativo", "Pretérito mais-que-perfeito composto do indicativo",
+        "Futuro do presente composto", "Futuro do pretérito composto",
+        "Pretérito perfeito composto do subjuntivo", "Pretérito mais-que-perfeito composto do subjuntivo",
+        "Futuro composto do subjuntivo", "Infinitivo pessoal", "Infinitivo impessoal", "Gerúndio", "Particípio",
+    ],
+    "verbo_voz": [
+        "Voz ativa", "Voz passiva analítica", "Voz passiva sintética", "Voz reflexiva", "Voz reflexiva recíproca",
+    ],
+    "verbo_valor": [
+        "Presente: fato atual", "Presente: ação habitual", "Presente: verdade atemporal", "Presente histórico",
+        "Presente com valor de futuro", "Pretérito perfeito: ação concluída",
+        "Pretérito imperfeito: ação contínua ou habitual no passado", "Pretérito imperfeito de cortesia",
+        "Pretérito imperfeito com valor de futuro do pretérito", "Mais-que-perfeito: passado anterior a outro passado",
+        "Futuro do presente: fato posterior", "Futuro do presente: probabilidade ou incerteza",
+        "Futuro do presente com valor de imperativo", "Futuro do pretérito: hipótese ou condição",
+        "Futuro do pretérito: atenuação ou polidez", "Futuro do pretérito: incerteza ou fato não confirmado",
+        "Futuro do pretérito: futuro em relação a um passado", "Subjuntivo: dúvida ou hipótese",
+        "Subjuntivo: desejo", "Imperativo: ordem", "Imperativo: pedido ou conselho",
+        "Gerúndio: ação em curso", "Infinitivo com valor de imperativo",
+    ],
 }
 COLUNAS = ["grupo", "oracao", "camada", "resposta", "aceitas", "explicacao"]
 _MARCA = re.compile(r"\{\{(.+?)\}\}", re.S)
@@ -87,7 +123,10 @@ Termos acessórios;O menino de boné chegou {{cedo}}.;sintaxe;Adjunto adverbial 
 Termos acessórios;O livro {{que}} li era ótimo.;morfologia;Pronome relativo;;Retoma "livro" e inicia oração adjetiva.
 Orações adverbiais;Saímos, {{embora chovesse}}.;oracoes;Subordinada adverbial concessiva;;"Embora" introduz fato contrário que não impede a ação.
 Vírgula;No fim da tarde{{,}} os alunos saíram.;pontuacao;Isola adjunto adverbial deslocado;;Adjunto adverbial anteposto pode ser isolado por vírgula.
-Vírgula;Os alunos da turma B{{,}} saíram cedo.;pontuacao;Incorreta: separa sujeito e verbo;;Não se separa o sujeito do verbo por vírgula."""
+Vírgula;Os alunos da turma B{{,}} saíram cedo.;pontuacao;Incorreta: separa sujeito e verbo;;Não se separa o sujeito do verbo por vírgula.
+Verbos;Segundo a polícia, o suspeito {{teria fugido}} pela janela.;tempo;Futuro do pretérito composto;;Locução com o auxiliar "ter" no futuro do pretérito.
+Verbos;Segundo a polícia, o suspeito {{teria fugido}} pela janela.;valor;Futuro do pretérito: incerteza ou fato não confirmado;;O jornalista não assume o fato como certo.
+Verbos;{{Vendem-se}} casas.;voz;Voz passiva sintética;;"Se" apassivador com verbo transitivo direto: casas são vendidas."""
 
 
 # =============================
@@ -119,7 +158,12 @@ def normalizar_camada(c):
     return {"morfologia": "morfologia", "morfologica": "morfologia", "classe": "morfologia",
             "sintaxe": "sintaxe", "sintatica": "sintaxe", "funcao": "sintaxe",
             "oracoes": "oracoes", "oracao": "oracoes", "periodo": "oracoes",
-            "pontuacao": "pontuacao", "virgula": "pontuacao"}.get(n)
+            "pontuacao": "pontuacao", "virgula": "pontuacao",
+            "verbo_tempo": "verbo_tempo", "tempo": "verbo_tempo", "tempoverbal": "verbo_tempo",
+            "modoetempo": "verbo_tempo", "modo/tempo": "verbo_tempo", "tempos": "verbo_tempo",
+            "verbo_voz": "verbo_voz", "voz": "verbo_voz", "vozverbal": "verbo_voz",
+            "verbo_valor": "verbo_valor", "valor": "verbo_valor", "valorverbal": "verbo_valor",
+            "emprego": "verbo_valor", "valorsemantico": "verbo_valor"}.get(n)
 
 
 def _bolinha(n):
@@ -207,7 +251,8 @@ def interpretar_csv(db, txt, aceitar_novos=False):
             erros.append(f"Linha {n}: marque exatamente um trecho com {{{{ }}}} (encontrei {len(marcas)}).")
             continue
         if not camada:
-            erros.append(f"Linha {n}: camada '{campo('camada')}' inválida (use morfologia, sintaxe, oracoes ou pontuacao).")
+            erros.append(f"Linha {n}: camada '{campo('camada')}' inválida (use morfologia, sintaxe, oracoes, "
+                         "pontuacao, tempo, voz ou valor).")
             continue
 
         def validar(valor):
@@ -273,6 +318,15 @@ def importar(db, exercicios, novos_rotulos, login):
 def prompt_llm(grupo, camadas, quantidade, extras_por_camada):
     listas = "\n".join(f"  {c}: " + ", ".join(extras_por_camada[c]) for c in camadas)
     nomes_camadas = ", ".join(camadas)
+    dica_verbos = ""
+    if any(c.startswith("verbo_") for c in camadas):
+        dica_verbos = (
+            "\n- Verbos: destaque a forma verbal inteira, incluindo locuções e tempos compostos (ex.: {{teria fugido}},"
+            " {{vendem-se}}). Para a mesma forma, crie uma linha por camada verbal (verbo_tempo, verbo_voz, verbo_valor)."
+            "\n- Estilo Cebraspe: privilegie futuro do pretérito de incerteza ou atenuação, presente histórico e"
+            " com valor de futuro, imperfeito de cortesia, subjuntivo em orações condicionais e concessivas,"
+            " passiva sintética × índice de indeterminação do sujeito, e correlação verbal"
+            " (se + imperfeito do subjuntivo → futuro do pretérito).")
     return f"""Você vai criar exercícios de análise morfossintática para concurso.
 
 FORMATO (obrigatório):
@@ -291,7 +345,7 @@ FORMATO (obrigatório):
 CONTEÚDO:
 - Gere {quantidade} orações com 1 a 3 destaques cada, em estilo de prova de concurso.
 - Inclua casos que costumam confundir: complemento nominal × adjunto adnominal, objeto indireto × complemento nominal, adjetiva restritiva × explicativa, vírgulas proibidas.
-- Se uma classificação for discutível entre gramáticos, use a coluna "aceitas" e explique."""
+- Se uma classificação for discutível entre gramáticos, use a coluna "aceitas" e explique.{dica_verbos}"""
 
 
 # =============================
@@ -359,6 +413,8 @@ def _css():
     .sx-hl sup{font-size:12px;font-weight:700;color:#8a6d00;margin-left:1px}
     .sx-hl.oracoes sup{color:#6b46c1}
     .sx-hl.pontuacao sup{color:#c0392b}
+    .sx-hl.verbo_tempo,.sx-hl.verbo_voz,.sx-hl.verbo_valor{background:#dbeafe;border-bottom:2px solid #2563eb}
+    .sx-hl.verbo_tempo sup,.sx-hl.verbo_voz sup,.sx-hl.verbo_valor sup{color:#2563eb}
     .sx-ok{color:#1e7e34}.sx-bad{color:#c0392b}
     .sx-exp{font-size:13px;color:#555;margin:-6px 0 10px 0}
     </style>""", unsafe_allow_html=True)
@@ -412,11 +468,11 @@ def render_page(db, login, admin=False):
         _sessao(db, login)
         return
 
-    t1, t2, t3, t4 = st.tabs(["✍️ Treinar", "📊 Desempenho", "📥 Importar", "🗂️ Grupos"])
-    with t1:
-        _aba_treinar(db, login)
+    t2, t1, t3, t4 = st.tabs(["🌡️ Desempenho", "✍️ Treinar", "📥 Importar", "🗂️ Grupos"])
     with t2:
         _aba_desempenho(db, login)
+    with t1:
+        _aba_treinar(db, login)
     with t3:
         _aba_importar(db, login)
     with t4:
@@ -593,64 +649,172 @@ def _confusoes(linhas, limite=15):
             for k, v in sorted(cont.items(), key=lambda kv: -kv[1])[:limite]]
 
 
-# ---- Desempenho geral ----
+# ---- Desempenho (termômetro) ----
+FAIXAS = {"🔴 Reforçar": "#d64545", "🟡 Atenção": "#e0a526", "🟢 Em dia": "#2e9e5b"}
+MIN_RECENTE = 5  # respostas nos últimos 30 dias para usar a janela recente
+
+
+def _hoje():
+    return datetime.now(FUSO).date()
+
+
+def _faixa(p):
+    return "🔴 Reforçar" if p >= 45 else "🟡 Atenção" if p >= 25 else "🟢 Em dia"
+
+
+def dados_desempenho(db, login):
+    docs = db.sx_respostas.find({"usuario_login": login}, {"exercicio_id": 1, "item_id": 1, "camada": 1, "resposta": 1,
+                                                           "correta": 1, "acertou": 1, "grupo": 1, "em": 1})
+    r = pd.DataFrame([{"chave": f"{d.get('exercicio_id')}|{d.get('item_id')}", "camada": d.get("camada"),
+                       "resposta": d.get("resposta"), "correta": d.get("correta") or "", "grupo": d.get("grupo") or "—",
+                       "acertou": bool(d.get("acertou")), "branco": not d.get("resposta"), "em": d.get("em") or ""}
+                      for d in docs])
+    if r.empty:
+        return r
+    r["dia"] = pd.to_datetime(r["em"], utc=True, errors="coerce").dt.tz_convert(FUSO).dt.strftime("%Y-%m-%d")
+    r["Camada"] = r["camada"].map(lambda c: NOMES_CAMADA.get(c, c))
+    return r.dropna(subset=["dia"])
+
+
+def indicadores(r, chaves, hoje, janela=30):
+    """Índice de prioridade de reforço (0–100) por grupo de chaves.
+    45% erro (últimos 30 dias, ou histórico se houver poucas respostas recentes) + 25% pendências (destaques cuja
+    última tentativa está errada) + 15% respostas em branco + 15% tempo sem praticar (0 a 30 dias)."""
+    corte = (hoje - timedelta(days=janela)).isoformat()
+    r = r.assign(rec=r["dia"] >= corte)
+    g = r.groupby(chaves).agg(Respostas=("acertou", "size"), ac=("acertou", "sum"), br=("branco", "sum"),
+                              n_rec=("rec", "sum"), ultimo=("dia", "max")).reset_index()
+    rr = r[r["rec"]].groupby(chaves).agg(ac_rec=("acertou", "sum"), br_rec=("branco", "sum")).reset_index()
+    ult = r.sort_values("em").groupby("chave").tail(1).assign(errado=lambda d: ~d["acertou"])
+    u = ult.groupby(chaves).agg(Destaques=("chave", "size"), Pendentes=("errado", "sum")).reset_index()
+    g = g.merge(rr, on=chaves, how="left").merge(u, on=chaves, how="left")
+    g[["ac_rec", "br_rec"]] = g[["ac_rec", "br_rec"]].fillna(0)
+    recente = g["n_rec"] >= MIN_RECENTE
+    g["erro"] = (1 - g["ac_rec"] / g["n_rec"].clip(lower=1)).where(recente, 1 - g["ac"] / g["Respostas"])
+    g["brp"] = (g["br_rec"] / g["n_rec"].clip(lower=1)).where(recente, g["br"] / g["Respostas"])
+    g["pendp"] = g["Pendentes"] / g["Destaques"]
+    g["Dias sem praticar"] = (pd.Timestamp(hoje) - pd.to_datetime(g["ultimo"])).dt.days
+    parado = (g["Dias sem praticar"] / 30).clip(0, 1)
+    g["Prioridade"] = (100 * (0.45 * g["erro"] + 0.25 * g["pendp"] + 0.15 * g["brp"] + 0.15 * parado)).round(0)
+    g["Situação"] = g["Prioridade"].map(_faixa)
+    g["Acerto (%)"] = ((1 - g["erro"]) * 100).round(1)
+    g["Base"] = ["30 dias" if x else "histórico" for x in recente]
+    g["Pendentes"] = g["Pendentes"].astype(int)
+    return g.sort_values("Prioridade", ascending=False)
+
+
+def _sequencia(dias_estudo, hoje):
+    d = hoje if hoje.isoformat() in dias_estudo else hoje - timedelta(days=1)
+    n = 0
+    while d.isoformat() in dias_estudo:
+        n, d = n + 1, d - timedelta(days=1)
+    return n
+
+
+def _treinar_classificacao(db, camada, correta):
+    alvo = normalizar(correta)
+    exs = [str(e["_id"]) for e in db.sx_exercicios.find({"itens": {"$elemMatch": {"camada": camada}}}, {"itens": 1})
+           if any(i["camada"] == camada and normalizar(i["resposta"]) == alvo for i in e.get("itens") or [])]
+    random.shuffle(exs)
+    if exs:
+        _iniciar_sessao(exs[:15], [camada])
+
+
+def _treinar_lista(fila, camadas):
+    if fila:
+        _iniciar_sessao(fila, camadas)
+
+
+def _cor():
+    return alt.Scale(domain=list(FAIXAS), range=list(FAIXAS.values()))
+
+
 def _aba_desempenho(db, login):
-    docs = list(db.sx_respostas.find({"usuario_login": login},
-                                     {"camada": 1, "resposta": 1, "correta": 1, "acertou": 1, "grupo": 1}))
-    if not docs:
+    r = dados_desempenho(db, login)
+    if r.empty:
         st.info("Faça uma sessão de treino para ver seu desempenho.")
         return
-    ok = sum(1 for d in docs if d["acertou"])
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Destaques respondidos", len(docs))
-    m2.metric("Corretos", ok)
-    m3.metric("Aproveitamento geral", f"{ok / len(docs) * 100:.1f}%")
+    hoje = _hoje()
+    c30, c7 = (hoje - timedelta(days=30)).isoformat(), (hoje - timedelta(days=6)).isoformat()
+    r30 = r[r["dia"] >= c30]
+    ult = r.sort_values("em").groupby("chave").tail(1)
+    k = st.columns(5)
+    k[0].metric("Acerto (30 dias)", f"{r30['acertou'].mean() * 100:.0f}%" if len(r30) else "—")
+    k[1].metric("Acerto geral", f"{r['acertou'].mean() * 100:.0f}%")
+    k[2].metric("Destaques (7 dias)", int((r["dia"] >= c7).sum()))
+    k[3].metric("Sequência", f"{_sequencia(set(r['dia']), hoje)} dia(s)")
+    k[4].metric("Pendentes", int((~ult["acertou"]).sum()), help="Destaques cuja última tentativa está errada.")
 
-    st.markdown("#### Por camada")
-    st.dataframe(_tabela_camadas(docs), width="stretch", hide_index=True)
+    por_cam = indicadores(r, ["camada", "Camada"], hoje)
+    por_cls = indicadores(r, ["camada", "Camada", "correta"], hoje).rename(columns={"correta": "Classificação"})
+    barra = {c: st.column_config.ProgressColumn(c, format="%.0f", min_value=0, max_value=100)
+             for c in ("Prioridade", "Acerto (%)")}
+    cols = ["Situação", "Prioridade", "Acerto (%)", "Pendentes", "Destaques", "Respostas", "Dias sem praticar", "Base"]
 
-    st.markdown("#### Por grupo")
-    agg = {}
-    for d in docs:
-        a = agg.setdefault(d.get("grupo") or "—", [0, 0])
-        a[0] += 1 if d["acertou"] else 0
-        a[1] += 1
-    st.dataframe(sorted(({"Grupo": g, "Respostas": a[1], "Aproveitamento (%)": round(a[0] / a[1] * 100, 1)}
-                         for g, a in agg.items()), key=lambda r: r["Aproveitamento (%)"]),
-                 width="stretch", hide_index=True)
+    st.markdown("#### 🌡️ Termômetro por camada")
+    st.altair_chart(alt.Chart(por_cam).mark_bar().encode(
+        x=alt.X("Prioridade:Q", scale=alt.Scale(domain=[0, 100]), title="Prioridade de reforço"),
+        y=alt.Y("Camada:N", sort="-x", title=None),
+        color=alt.Color("Situação:N", scale=_cor(), legend=alt.Legend(orient="bottom")),
+        tooltip=["Camada", "Prioridade", "Acerto (%)", "Pendentes", "Respostas"]))
+    st.dataframe(por_cam[["Camada"] + cols], width="stretch", hide_index=True, column_config=barra)
+    with st.expander("ℹ️ Como a prioridade é calculada"):
+        st.markdown(
+            "**Índice de prioridade de reforço (0 a 100)**, quanto maior, mais urgente:\n"
+            f"- **45% erro**: usa os últimos 30 dias quando há pelo menos {MIN_RECENTE} respostas; senão, o "
+            "histórico (coluna *Base*).\n"
+            "- **25% pendências**: destaques cuja última tentativa ainda está errada (o caderno de erros).\n"
+            "- **15% em branco**: não saber responder pesa mais do que errar.\n"
+            "- **15% tempo sem praticar**: sobe até 30 dias sem treinar o tópico (curva do esquecimento).\n\n"
+            "🔴 **Reforçar** ≥ 45 · 🟡 **Atenção** 25–44 · 🟢 **Em dia** < 25.")
 
-    st.markdown("#### Por classificação (a resposta certa era…)")
-    por = {}
-    for d in docs:
-        a = por.setdefault((d["camada"], d["correta"]), [0, 0])
-        a[0] += 1 if d["acertou"] else 0
-        a[1] += 1
-    tabela = sorted(({"Camada": NOMES_CAMADA.get(c, c), "Classificação": r, "Vezes": a[1],
-                      "Acerto (%)": round(a[0] / a[1] * 100, 1)} for (c, r), a in por.items()),
-                    key=lambda x: (x["Acerto (%)"], -x["Vezes"]))
-    st.dataframe(tabela, width="stretch", hide_index=True,
-                 column_config={"Acerto (%)": st.column_config.ProgressColumn(
-                     "Acerto", format="%.1f%%", min_value=0, max_value=100)})
+    st.markdown("#### 🎯 Classificações para reforçar")
+    cams = st.multiselect("Camadas", list(por_cam["Camada"]), key="sx_term_cam", placeholder="Todas")
+    ver = por_cls[por_cls["Camada"].isin(cams)] if cams else por_cls
+    alvo = ver[(ver["Situação"] != "🟢 Em dia") & (ver["Respostas"] >= 2)].head(8)
+    if alvo.empty:
+        st.success("Nenhuma classificação em alerta com esses filtros. 👏")
+    for i, x in enumerate(alvo.itertuples()):
+        a1, a2 = st.columns([5, 1])
+        a1.markdown(f"{x.Situação} **{_esc(x.Classificação)}** · {_esc(x.Camada)}  \n"
+                    f"prioridade {x.Prioridade:.0f} · acerto {(1 - x.erro) * 100:.0f}% · "
+                    f"{x.Pendentes} pendente(s) · {x.Respostas} resposta(s)")
+        a2.button("▶ Treinar", key=f"sx_tr_{i}", width="stretch", on_click=_treinar_classificacao,
+                  args=(db, x.camada, x.Classificação))
+    pend = ult[~ult["acertou"]]
+    if cams:
+        pend = pend[pend["Camada"].isin(cams)]
+    fila = list(dict.fromkeys(c.split("|")[0] for c in pend["chave"]))
+    if fila:
+        st.button(f"📕 Refazer o caderno de erros ({len(fila)} orações)", type="primary", key="sx_tr_pend",
+                  on_click=_treinar_lista, args=(fila[:30], sorted(set(pend["camada"]))))
+    with st.expander("Tabela completa por classificação"):
+        st.dataframe(ver[["Camada", "Classificação"] + cols], width="stretch", hide_index=True, column_config=barra)
 
-    conf = _confusoes(docs, 20)
+    conf = _confusoes(r[~r["acertou"]].to_dict("records"), 20)
     if conf:
         st.markdown("#### 🔀 Mapa de confusões")
         st.caption("O que você marcou × o que era. As primeiras linhas são as distinções a revisar.")
         st.dataframe(conf, width="stretch", hide_index=True)
 
-    fracas = [(c, r) for (c, r), a in por.items() if a[1] >= 3 and a[0] / a[1] < 0.7]
-    if fracas:
-        st.markdown("#### 🎯 Treinar meus pontos fracos")
-        st.caption("Classificações com menos de 70% de acerto (mínimo de 3 respostas): "
-                   + "; ".join(f"{r}" for _, r in fracas[:8]))
-        if st.button("▶ Sessão com as classificações em que mais erro", type="primary", key="sx_fracos"):
-            alvo = {(c, normalizar(r)) for c, r in fracas}
-            exs = [e for e in db.sx_exercicios.find({}, {"itens": 1})
-                   if any((i["camada"], normalizar(i["resposta"])) in alvo for i in e.get("itens") or [])]
-            random.shuffle(exs)
-            if exs:
-                _iniciar_sessao([str(e["_id"]) for e in exs[:15]], list(CAMADAS))
-                st.rerun()
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown("#### 📈 Acerto semanal por camada")
+        ev = r.assign(Semana=pd.to_datetime(r["dia"]).dt.to_period("W").dt.start_time)
+        ev = ev.groupby(["Semana", "Camada"], as_index=False).agg(Acerto=("acertou", "mean"), n=("acertou", "size"))
+        ev["Acerto"] = (ev["Acerto"] * 100).round(1)
+        st.altair_chart(alt.Chart(ev).mark_line(point=True).encode(
+            x=alt.X("Semana:T", title=None), y=alt.Y("Acerto:Q", scale=alt.Scale(domain=[0, 100]), title="%"),
+            color=alt.Color("Camada:N", legend=alt.Legend(orient="bottom")),
+            tooltip=["Semana:T", "Camada", "Acerto", "n"]))
+    with g2:
+        st.markdown("#### 🧭 Grupo × camada")
+        hm = r.groupby(["grupo", "Camada"], as_index=False).agg(Acerto=("acertou", "mean"), n=("acertou", "size"))
+        hm["Acerto"] = (hm["Acerto"] * 100).round(0)
+        base = alt.Chart(hm).encode(x=alt.X("Camada:N", title=None), y=alt.Y("grupo:N", title=None))
+        st.altair_chart(base.mark_rect().encode(
+            color=alt.Color("Acerto:Q", scale=alt.Scale(domain=[0, 100], scheme="redyellowgreen"), legend=None),
+            tooltip=["grupo", "Camada", "Acerto", "n"]) + base.mark_text().encode(text="Acerto:Q"))
 
 
 # ---- Importar ----
@@ -660,7 +824,8 @@ def _aba_importar(db, login):
     with st.expander("📄 Modelo de CSV"):
         st.code(MODELO_IMPORTACAO, language="text")
         st.caption("Colunas: grupo;oracao;camada;resposta;aceitas;explicacao. "
-                   "camada = morfologia, sintaxe, oracoes ou pontuacao. "
+                   "camada = morfologia, sintaxe, oracoes, pontuacao, tempo (modo e tempo verbal), "
+                   "voz ou valor (emprego do tempo verbal). "
                    "aceitas = outras respostas corretas separadas por |.")
     with st.expander("📚 Classificações aceitas (as opções do dropdown)"):
         for c in CAMADAS:
