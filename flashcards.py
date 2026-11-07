@@ -14,6 +14,7 @@ import io
 import random
 from datetime import datetime, timedelta, timezone
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
@@ -33,6 +34,10 @@ SEM_DISCIPLINA = "Sem disciplina"
 SEM_ASSUNTO = "Sem assunto"
 # Ordem das colunas quando o arquivo vem sem cabeçalho
 COLUNAS = ["frente", "verso", "disciplina", "assunto", "baralho"]
+# Respostas possíveis; "não sei" e "errei" levam o cartão de volta à caixa 1
+NOTAS = {"naosei": "🤷 Não sei", "errei": "😕 Errei", "acertei": "🙂 Acertei", "facil": "😎 Fácil"}
+RUIM = ("naosei", "errei")
+FAV = "__favoritos__"  # baralho fixo virtual: cartões com favorito=True
 
 MODELO_IMPORTACAO = """frente;verso;disciplina;assunto;baralho
 O que é habeas corpus?;Remédio constitucional que protege a liberdade de locomoção.;Direito Constitucional;Remédios constitucionais;Constitucional
@@ -96,6 +101,8 @@ def init_indexes(db):
                                             ("proxima_revisao", ASCENDING)], name="idx_fc_fila"),
         lambda: db.fc_cartoes.create_index([("usuario_login", ASCENDING), ("baralho_id", ASCENDING),
                                             ("assunto", ASCENDING)], name="idx_fc_assunto"),
+        lambda: db.fc_revisoes.create_index([("usuario_login", ASCENDING), ("dia", ASCENDING)],
+                                            name="idx_fc_rev_dia"),
     ):
         try:
             fn()
@@ -140,7 +147,7 @@ def resumo_por_assunto(db, login, baralho_ids=None):
                     "hoje": {"$sum": {"$cond": [{"$lte": ["$proxima_revisao", _hoje_str()]}, 1, 0]}},
                     "caixa": {"$avg": {"$ifNull": ["$caixa", 1]}},
                     "acertos": {"$sum": {"$ifNull": ["$acertos", 0]}},
-                    "erros": {"$sum": {"$ifNull": ["$erros", 0]}}}},
+                    "erros": {"$sum": {"$add": [{"$ifNull": ["$erros", 0]}, {"$ifNull": ["$naosei", 0]}]}}}},
     ]
     return [{"baralho_id": str(d["_id"]["b"]), "assunto": d["_id"]["a"], "total": d["total"],
              "hoje": d["hoje"], "caixa": d["caixa"], "acertos": d["acertos"], "erros": d["erros"]}
@@ -193,6 +200,7 @@ def renomear_assunto(db, login, baralho_id, antigo, novo):
 def excluir_baralho(db, login, baralho_id):
     oid = _oid(baralho_id)
     db.fc_cartoes.delete_many({"usuario_login": login, "baralho_id": oid})
+    db.fc_revisoes.delete_many({"usuario_login": login, "baralho_id": oid})
     db.fc_baralhos.delete_one({"_id": oid, "usuario_login": login})
 
 
@@ -204,10 +212,14 @@ def _novo_cartao(login, baralho_oid, frente, verso, assunto=""):
 
 
 def listar_cartoes(db, login, baralho_ids=None, assuntos=None):
-    """assuntos=None: todos; senão, só os assuntos listados ('' = sem assunto)."""
+    """assuntos=None: todos; senão, só os assuntos listados ('' = sem assunto).
+    FAV em baralho_ids inclui os favoritos de qualquer baralho."""
     filtro = {"usuario_login": login}
     if baralho_ids is not None:
-        filtro["baralho_id"] = {"$in": [o for o in (_oid(b) for b in baralho_ids) if o]}
+        cond = [{"baralho_id": {"$in": [o for o in (_oid(b) for b in baralho_ids if b != FAV) if o]}}]
+        if FAV in baralho_ids:
+            cond.append({"favorito": True})
+        filtro["$or"] = cond
     if assuntos is not None:
         vals = list(assuntos) + ([None] if "" in assuntos else [])
         filtro["assunto"] = {"$in": vals}
@@ -236,22 +248,31 @@ def adicionar_cartoes(db, login, baralho_id, cartoes):
 
 
 def registrar_revisao(db, login, cartao_id, nota):
-    """nota: 'errei' | 'acertei' | 'facil' — sistema de Leitner."""
+    """nota: 'naosei' | 'errei' | 'acertei' | 'facil' — sistema de Leitner.
+    Cada resposta também fica em `fc_revisoes`, base do termômetro de desempenho."""
     c = db.fc_cartoes.find_one({"_id": _oid(cartao_id), "usuario_login": login})
     if not c:
         return None
-    caixa = int(c.get("caixa") or 1)
-    if nota == "errei":
+    antes = caixa = int(c.get("caixa") or 1)
+    if nota in RUIM:
         caixa, dias = 1, 0  # volta para o início e reaparece ainda hoje
     else:
         caixa = min(MAX_CAIXA, caixa + (2 if nota == "facil" else 1))
         dias = INTERVALOS[caixa]
     proxima = (_hoje() + timedelta(days=dias)).isoformat()
     db.fc_cartoes.update_one({"_id": c["_id"]}, {
-        "$set": {"caixa": caixa, "proxima_revisao": proxima, "ultima_revisao": _agora()},
-        "$inc": {"revisoes": 1, "acertos": 0 if nota == "errei" else 1, "erros": 1 if nota == "errei" else 0},
+        "$set": {"caixa": caixa, "proxima_revisao": proxima, "ultima_revisao": _agora(), "ultima_nota": nota},
+        "$inc": {"revisoes": 1, "acertos": int(nota not in RUIM), "erros": int(nota == "errei"),
+                 "naosei": int(nota == "naosei")},
     })
+    db.fc_revisoes.insert_one({"usuario_login": login, "cartao_id": c["_id"], "baralho_id": c.get("baralho_id"),
+                               "assunto": c.get("assunto") or "", "nota": nota, "caixa_antes": antes,
+                               "dia": _hoje_str(), "em": _agora()})
     return proxima
+
+
+def favoritar(db, login, cartao_id, valor=True):
+    db.fc_cartoes.update_one({"_id": _oid(cartao_id), "usuario_login": login}, {"$set": {"favorito": bool(valor)}})
 
 
 # =============================
@@ -435,19 +456,28 @@ def render_page(db, login):
     c3.metric("Cartões", sum(b["total"] for b in baralhos))
     c4.metric("Para revisar hoje", sum(b["hoje"] for b in baralhos))
 
-    t_estudar, t_baralhos, t_desemp, t_importar = st.tabs(
-        ["📖 Estudar", "🗃️ Baralhos e cartões", "📊 Por disciplina e assunto", "📥 Importar"])
+    t_desemp, t_estudar, t_baralhos, t_importar = st.tabs(
+        ["🌡️ Desempenho", "📖 Estudar", "🗃️ Baralhos e cartões", "📥 Importar"])
+    with t_desemp:
+        _aba_desempenho(db, login, baralhos)
     with t_estudar:
         _aba_estudar(db, login, baralhos)
     with t_baralhos:
         _aba_baralhos(db, login, baralhos)
-    with t_desemp:
-        _aba_desempenho(db, login, baralhos)
     with t_importar:
         _aba_importar(db, login, baralhos)
 
 
 # ---- Estudar ----
+MODOS = {"dia": "Revisão do dia (espaçada)", "livre": "Treino livre (todos)",
+         "ruins": "Só os que errei ou não sabia"}
+
+
+def _iniciar_sessao(ids, inverter=False):
+    st.session_state.update(fc_fila=list(ids), fc_pos=0, fc_virado=False, fc_registrado=False,
+                            fc_inverter=inverter, fc_placar={k: 0 for k in NOTAS}, fc_por_assunto={})
+
+
 def _aba_estudar(db, login, baralhos):
     com_cartoes = [b for b in baralhos if b["total"]]
     if not com_cartoes:
@@ -459,34 +489,39 @@ def _aba_estudar(db, login, baralhos):
         discs = list(dict.fromkeys(b["disciplina"] for b in com_cartoes))
         sel_disc = st.multiselect("Disciplinas", discs, default=discs, format_func=_rotulo_disc)
         candidatos = [b for b in com_cartoes if b["disciplina"] in sel_disc]
-        nomes = {b["id"]: f"{b['nome']} ({b['hoje']} hoje / {b['total']})" for b in candidatos}
-        sel = st.multiselect("Baralhos", list(nomes), default=list(nomes), format_func=nomes.get)
+        n_fav = db.fc_cartoes.count_documents({"usuario_login": login, "favorito": True})
+        nomes = {FAV: f"⭐ Favoritos ({n_fav})"} if n_fav else {}
+        nomes.update({b["id"]: f"{b['nome']} ({b['hoje']} hoje / {b['total']})" for b in candidatos})
+        sel = st.multiselect("Baralhos", list(nomes), default=[i for i in nomes if i != FAV], format_func=nomes.get,
+                             help="⭐ Favoritos é um baralho fixo com os cartões que você marcou, de qualquer "
+                                  "disciplina. Marque com a estrela durante o estudo ou na tabela de cartões.")
 
         assuntos = sorted({a for b in candidatos if b["id"] in sel for a in b["assuntos"]},
                           key=lambda a: (a == "", a.lower()))
         sel_ass = st.multiselect("Assuntos (vazio = todos)", assuntos, format_func=_rotulo_assunto)
 
-        modo = st.radio("Modo", ["Revisão do dia (espaçada)", "Todos os cartões (treino livre)"],
-                        horizontal=True, key="fc_modo",
-                        help="Revisão do dia mostra só os cartões vencidos. No treino livre, as respostas "
-                             "também atualizam o agendamento.")
-        embaralhar = st.checkbox("Embaralhar", value=True, key="fc_emb")
+        modo = st.radio("Modo", list(MODOS), format_func=MODOS.get, horizontal=True, key="fc_modo2",
+                        help="Em todos os modos as respostas atualizam o agendamento.")
+        o1, o2, o3 = st.columns(3)
+        embaralhar = o1.checkbox("Embaralhar", value=True, key="fc_emb")
+        inverter = o2.checkbox("Verso primeiro", key="fc_inv", help="Mostra a resposta e você lembra a pergunta.")
+        limite = o3.number_input("Máx. de cartões (0 = todos)", 0, 1000, 0, step=10, key="fc_lim")
         if st.button("▶ Começar", type="primary", disabled=not sel):
             cartoes = listar_cartoes(db, login, sel, sel_ass or None)
-            if modo.startswith("Revisão"):
+            if modo == "dia":
                 hoje = _hoje_str()
                 cartoes = [c for c in cartoes if (c.get("proxima_revisao") or hoje) <= hoje]
                 cartoes.sort(key=lambda c: (c.get("caixa", 1), c.get("proxima_revisao") or ""))
+            elif modo == "ruins":
+                cartoes = [c for c in cartoes if c.get("ultima_nota") in RUIM]
             if embaralhar:
                 random.shuffle(cartoes)
+            if limite:
+                cartoes = cartoes[:limite]
             if not cartoes:
-                st.success("🎉 Nada para revisar hoje com esses filtros. Volte amanhã ou use o treino livre.")
+                st.success("🎉 Nenhum cartão com esses filtros neste modo.")
                 return
-            st.session_state["fc_fila"] = [str(c["_id"]) for c in cartoes]
-            st.session_state["fc_pos"] = 0
-            st.session_state["fc_virado"] = False
-            st.session_state["fc_placar"] = {"acertei": 0, "errei": 0, "facil": 0}
-            st.session_state["fc_por_assunto"] = {}
+            _iniciar_sessao([str(c["_id"]) for c in cartoes], inverter)
             st.rerun()
         return
 
@@ -496,35 +531,48 @@ def _aba_estudar(db, login, baralhos):
         _fim_sessao(placar)
         return
 
-    cartao = db.fc_cartoes.find_one({"_id": _oid(fila[pos]), "usuario_login": login})
+    cid = fila[pos]
+    cartao = db.fc_cartoes.find_one({"_id": _oid(cid), "usuario_login": login})
     if not cartao:  # excluído no meio da sessão
-        st.session_state["fc_pos"] = pos + 1
+        _avancar()
         st.rerun()
 
     bar = next((b for b in baralhos if b["id"] == str(cartao.get("baralho_id"))), {})
+    inv = st.session_state.get("fc_inverter", False)
+    pergunta, resposta = (cartao["verso"], cartao["frente"]) if inv else (cartao["frente"], cartao["verso"])
+    assunto = cartao.get("assunto") or ""
+    fav = bool(cartao.get("favorito"))
+
     st.progress(pos / len(fila), text=f"Cartão {pos + 1} de {len(fila)}")
-    st.markdown(
+    t1, t2 = st.columns([6, 1])
+    t1.markdown(
         f"<span class='fc2-tag'>{_esc(_rotulo_disc(bar.get('disciplina')))}</span>"
-        f"<span class='fc2-tag assunto'>{_esc(_rotulo_assunto(cartao.get('assunto')))}</span>"
+        f"<span class='fc2-tag assunto'>{_esc(_rotulo_assunto(assunto))}</span>"
         f"<span class='fc2-meta'>{_esc(bar.get('nome', ''))} · caixa {cartao.get('caixa', 1)} de {MAX_CAIXA} · "
         f"revisado {cartao.get('revisoes', 0)}x</span>", unsafe_allow_html=True)
-    st.markdown(f"<div class='fc2-card fc2-frente'>{_esc(cartao['frente'])}</div>", unsafe_allow_html=True)
+    t2.button("⭐" if fav else "☆", key=f"fc_fav_{cid}_{pos}", width="stretch",
+              help="Tirar dos favoritos" if fav else "Guardar no baralho ⭐ Favoritos",
+              on_click=favoritar, args=(db, login, cid, not fav))
+    st.markdown(f"<div class='fc2-card fc2-frente'>{_esc(pergunta)}</div>", unsafe_allow_html=True)
 
     if not st.session_state.get("fc_virado"):
-        if st.button("👀 Mostrar resposta", type="primary", width="stretch"):
-            st.session_state["fc_virado"] = True
-            st.rerun()
+        b1, b2 = st.columns([3, 1])
+        b1.button("👀 Mostrar resposta", type="primary", width="stretch", on_click=_virar)
+        b2.button("🤷 Não sei", width="stretch", help="Registra que você não lembrava e mostra a resposta.",
+                  on_click=_responder, args=(db, login, cid, "naosei", assunto, False))
     else:
-        st.markdown(f"<div class='fc2-card fc2-verso'>{_esc(cartao['verso'])}</div>", unsafe_allow_html=True)
-        caixa = int(cartao.get("caixa") or 1)
-        assunto = cartao.get("assunto") or ""
-        b1, b2, b3 = st.columns(3)
-        b1.button("😕 Errei · hoje", width="stretch", on_click=_responder,
-                  args=(db, login, fila[pos], "errei", assunto))
-        b2.button(f"🙂 Acertei · {INTERVALOS[min(MAX_CAIXA, caixa + 1)]}d", width="stretch", type="primary",
-                  on_click=_responder, args=(db, login, fila[pos], "acertei", assunto))
-        b3.button(f"😎 Fácil · {INTERVALOS[min(MAX_CAIXA, caixa + 2)]}d", width="stretch",
-                  on_click=_responder, args=(db, login, fila[pos], "facil", assunto))
+        st.markdown(f"<div class='fc2-card fc2-verso'>{_esc(resposta)}</div>", unsafe_allow_html=True)
+        if st.session_state.get("fc_registrado"):
+            st.caption("Registrado como **Não sei**: o cartão volta para a caixa 1 e reaparece nesta sessão.")
+            st.button("Próximo ▶", type="primary", width="stretch", on_click=_avancar)
+        else:
+            caixa = int(cartao.get("caixa") or 1)
+            rot = {"naosei": "🤷 Não sei · hoje", "errei": "😕 Errei · hoje",
+                   "acertei": f"🙂 Acertei · {INTERVALOS[min(MAX_CAIXA, caixa + 1)]}d",
+                   "facil": f"😎 Fácil · {INTERVALOS[min(MAX_CAIXA, caixa + 2)]}d"}
+            for col, (nota, label) in zip(st.columns(4), rot.items()):
+                col.button(label, width="stretch", type="primary" if nota == "acertei" else "secondary",
+                           key=f"fc_r_{nota}", on_click=_responder, args=(db, login, cid, nota, assunto))
 
     if st.button("⏹ Encerrar sessão", key="fc_parar"):
         _encerrar_sessao()
@@ -534,16 +582,14 @@ def _aba_estudar(db, login, baralhos):
 def _fim_sessao(placar):
     vistos = sum(placar.values())
     st.success(f"Sessão concluída: {vistos} resposta(s).")
-    p1, p2, p3 = st.columns(3)
-    p1.metric("😕 Errei", placar.get("errei", 0))
-    p2.metric("🙂 Acertei", placar.get("acertei", 0))
-    p3.metric("😎 Fácil", placar.get("facil", 0))
+    for col, (nota, label) in zip(st.columns(4), NOTAS.items()):
+        col.metric(label, placar.get(nota, 0))
     st.progress((placar.get("acertei", 0) + placar.get("facil", 0)) / (vistos or 1),
                 text="Aproveitamento da sessão")
     por_assunto = st.session_state.get("fc_por_assunto") or {}
     if len(por_assunto) > 1:
         st.markdown("**Na sessão, por assunto**")
-        st.dataframe(sorted(({"Assunto": _rotulo_assunto(a), "Respostas": v["n"], "Erros": v["erros"],
+        st.dataframe(sorted(({"Assunto": _rotulo_assunto(a), "Respostas": v["n"], "Erros/não sei": v["erros"],
                               "Acerto (%)": round((v["n"] - v["erros"]) / v["n"] * 100, 1)}
                              for a, v in por_assunto.items()), key=lambda r: r["Acerto (%)"]),
                      width="stretch", hide_index=True)
@@ -552,21 +598,35 @@ def _fim_sessao(placar):
         st.rerun()
 
 
-def _responder(db, login, cartao_id, nota, assunto=""):
-    registrar_revisao(db, login, cartao_id, nota)
-    fila = st.session_state["fc_fila"]
-    if nota == "errei" and fila.count(cartao_id) < 3:
-        fila.append(cartao_id)  # errou: volta no fim da sessão (no máximo 3 vezes)
-    st.session_state["fc_placar"][nota] = st.session_state["fc_placar"].get(nota, 0) + 1
-    pa = st.session_state.setdefault("fc_por_assunto", {}).setdefault(assunto, {"n": 0, "erros": 0})
-    pa["n"] += 1
-    pa["erros"] += 1 if nota == "errei" else 0
+def _virar():
+    st.session_state["fc_virado"] = True
+
+
+def _avancar():
     st.session_state["fc_pos"] = st.session_state.get("fc_pos", 0) + 1
     st.session_state["fc_virado"] = False
+    st.session_state["fc_registrado"] = False
+
+
+def _responder(db, login, cartao_id, nota, assunto="", avancar=True):
+    registrar_revisao(db, login, cartao_id, nota)
+    fila = st.session_state["fc_fila"]
+    if nota in RUIM and fila.count(cartao_id) < 3:
+        fila.append(cartao_id)  # volta no fim da sessão (no máximo 3 vezes)
+    placar = st.session_state.setdefault("fc_placar", {})
+    placar[nota] = placar.get(nota, 0) + 1
+    pa = st.session_state.setdefault("fc_por_assunto", {}).setdefault(assunto, {"n": 0, "erros": 0})
+    pa["n"] += 1
+    pa["erros"] += 1 if nota in RUIM else 0
+    if avancar:
+        _avancar()
+    else:
+        st.session_state["fc_virado"] = True
+        st.session_state["fc_registrado"] = True
 
 
 def _encerrar_sessao():
-    for k in ("fc_fila", "fc_pos", "fc_virado", "fc_placar", "fc_por_assunto"):
+    for k in ("fc_fila", "fc_pos", "fc_virado", "fc_registrado", "fc_inverter", "fc_placar", "fc_por_assunto"):
         st.session_state.pop(k, None)
 
 
@@ -659,7 +719,8 @@ def _aba_baralhos(db, login, baralhos):
 
     st.markdown("**Cartões** — edite direto na tabela; marque linhas e use a lixeira para excluir.")
     df = pd.DataFrame([{
-        "id": str(c["_id"]), "Assunto": c.get("assunto") or "", "Frente": c.get("frente", ""),
+        "id": str(c["_id"]), "⭐": bool(c.get("favorito")), "Assunto": c.get("assunto") or "",
+        "Frente": c.get("frente", ""),
         "Verso": c.get("verso", ""), "Caixa": c.get("caixa", 1),
         "Próxima revisão": _fmt_data(c.get("proxima_revisao") or ""),
         "Acertos": c.get("acertos", 0), "Erros": c.get("erros", 0),
@@ -668,6 +729,7 @@ def _aba_baralhos(db, login, baralhos):
         df, key=f"fc_editor_{bid}_{'|'.join(filtro_ass or [])}", hide_index=True, width="stretch",
         num_rows="dynamic",
         column_config={"id": None,
+                       "⭐": st.column_config.CheckboxColumn("⭐", help="Favorito", width="small", default=False),
                        "Assunto": st.column_config.TextColumn(width="medium"),
                        "Frente": st.column_config.TextColumn(width="large", required=True),
                        "Verso": st.column_config.TextColumn(width="large", required=True)},
@@ -701,9 +763,12 @@ def _salvar_editor(db, login, bid, original, editado):
         rid = r.get("id")
         if isinstance(rid, str) and rid in por_id.index:
             o = por_id.loc[rid]
-            if frente and verso and (frente != o["Frente"] or verso != o["Verso"] or assunto != o["Assunto"]):
+            fav = bool(r.get("⭐")) if not pd.isna(r.get("⭐")) else False
+            if frente and verso and (frente != o["Frente"] or verso != o["Verso"] or assunto != o["Assunto"]
+                                     or fav != bool(o["⭐"])):
                 db.fc_cartoes.update_one({"_id": _oid(rid), "usuario_login": login},
-                                         {"$set": {"frente": frente, "verso": verso, "assunto": assunto}})
+                                         {"$set": {"frente": frente, "verso": verso, "assunto": assunto,
+                                                   "favorito": fav}})
                 alterados += 1
         elif frente and verso:
             novos.append((frente, verso, assunto))
@@ -711,57 +776,204 @@ def _salvar_editor(db, login, bid, original, editado):
     return f"Salvo: {alterados} editado(s), {ins} novo(s), {len(removidos)} excluído(s)."
 
 
-# ---- Desempenho por disciplina e assunto ----
-def _aba_desempenho(db, login, baralhos):
-    linhas = resumo_por_assunto(db, login)
-    if not linhas:
-        st.info("Sem cartões ainda.")
+# ---- Desempenho (termômetro) ----
+FAIXAS = {"🔴 Reforçar": "#d64545", "🟡 Atenção": "#e0a526", "🟢 Em dia": "#2e9e5b", "⚪ Não iniciado": "#9aa0a6"}
+MIN_RECENTE = 5  # respostas nos últimos 30 dias para usar a janela recente
+
+
+def _faixa(p):
+    if pd.isna(p):
+        return "⚪ Não iniciado"
+    return "🔴 Reforçar" if p >= 45 else "🟡 Atenção" if p >= 25 else "🟢 Em dia"
+
+
+def dados_termometro(db, login, baralhos, dias=84):
+    """(cartões, revisões dos últimos `dias`) como DataFrames, com disciplina e assunto já resolvidos."""
+    disc_de = {b["id"]: _rotulo_disc(b["disciplina"]) for b in baralhos}
+    nome_de = {b["id"]: b["nome"] for b in baralhos}
+    hoje = _hoje_str()
+    cards = db.fc_cartoes.find({"usuario_login": login},
+                               {"baralho_id": 1, "assunto": 1, "caixa": 1, "proxima_revisao": 1, "frente": 1,
+                                "acertos": 1, "erros": 1, "naosei": 1})
+    c = pd.DataFrame([{
+        "id": str(x["_id"]), "Disciplina": disc_de.get(str(x.get("baralho_id")), _rotulo_disc("")),
+        "Baralho": nome_de.get(str(x.get("baralho_id")), "—"), "Assunto": _rotulo_assunto(x.get("assunto")),
+        "Frente": x.get("frente", ""), "caixa": int(x.get("caixa") or 1),
+        "prox": x.get("proxima_revisao") or hoje, "a": x.get("acertos") or 0, "e": x.get("erros") or 0,
+        "ns": x.get("naosei") or 0} for x in cards])
+    if c.empty:
+        return c, pd.DataFrame(columns=["id", "nota", "dia"])
+    c["dom"] = (c["caixa"] - 1) / (MAX_CAIXA - 1)
+    c["venc"] = c["prox"] <= hoje
+    corte = (_hoje() - timedelta(days=dias)).isoformat()
+    logs = db.fc_revisoes.find({"usuario_login": login, "dia": {"$gte": corte}}, {"cartao_id": 1, "nota": 1, "dia": 1})
+    l = pd.DataFrame([{"id": str(x["cartao_id"]), "nota": x["nota"], "dia": x["dia"]} for x in logs],
+                     columns=["id", "nota", "dia"])
+    return c, l
+
+
+def indicadores(c, l, chaves, janela=30):
+    """Índice de prioridade de reforço (0–100) por grupo.
+    45% erro (retenção recente, ou histórico se houver poucas respostas recentes) + 25% falta de domínio
+    (caixa média) + 15% taxa de 'não sei' + 15% cartões vencidos."""
+    g = c.groupby(chaves).agg(Cartões=("id", "size"), dom=("dom", "mean"), venc=("venc", "mean"),
+                              a=("a", "sum"), e=("e", "sum"), ns=("ns", "sum")).reset_index()
+    corte = (_hoje() - timedelta(days=janela)).isoformat()
+    rec = l[l["dia"] >= corte].merge(c[["id"] + chaves], on="id")
+    rec = rec.assign(bom=~rec["nota"].isin(RUIM), nsr=rec["nota"].eq("naosei"))
+    r = rec.groupby(chaves).agg(n_rec=("nota", "size"), bom_rec=("bom", "sum"), ns_rec=("nsr", "sum")).reset_index()
+    g = g.merge(r, on=chaves, how="left")
+    g[["n_rec", "bom_rec", "ns_rec"]] = g[["n_rec", "bom_rec", "ns_rec"]].fillna(0)
+    tot = g["a"] + g["e"] + g["ns"]
+    recente = g["n_rec"] >= MIN_RECENTE
+    g["ret"] = (g["bom_rec"] / g["n_rec"].clip(lower=1)).where(recente, (g["a"] / tot.clip(lower=1)).where(tot > 0))
+    g["nsp"] = (g["ns_rec"] / g["n_rec"].clip(lower=1)).where(recente, (g["ns"] / tot.clip(lower=1)).fillna(0))
+    g["Prioridade"] = (100 * (0.45 * (1 - g["ret"]) + 0.25 * (1 - g["dom"]) + 0.15 * g["nsp"]
+                              + 0.15 * g["venc"])).round(0)
+    g["Situação"] = g["Prioridade"].map(_faixa)
+    g["Base"] = ["30 dias" if r_ else ("histórico" if t else "—") for r_, t in zip(recente, tot)]
+    g["Retenção (%)"] = (g["ret"] * 100).round(1)
+    g["Domínio (%)"] = (g["dom"] * 100).round(1)
+    g["Não sei (%)"] = (g["nsp"] * 100).round(1)
+    g["Vencidos (%)"] = (g["venc"] * 100).round(1)
+    g["Respostas"] = tot.astype(int)
+    return g.sort_values("Prioridade", ascending=False, na_position="last")
+
+
+def _sequencia(dias_estudo):
+    """Dias seguidos de estudo terminando hoje (ou ontem, se hoje ainda não estudou)."""
+    d = _hoje()
+    if d.isoformat() not in dias_estudo:
+        d -= timedelta(days=1)
+    n = 0
+    while d.isoformat() in dias_estudo:
+        n, d = n + 1, d - timedelta(days=1)
+    return n
+
+
+def _treinar(ids, rotulo):
+    if not ids:
         return
-    por_id = {b["id"]: b for b in baralhos}
-    rows = []
-    for l in linhas:
-        b = por_id.get(l["baralho_id"], {})
-        resp = l["acertos"] + l["erros"]
-        rows.append({
-            "Disciplina": _rotulo_disc(b.get("disciplina")), "Baralho": b.get("nome", "—"),
-            "Assunto": _rotulo_assunto(l["assunto"]), "Cartões": l["total"], "Para revisar hoje": l["hoje"],
-            "Domínio (%)": round((l["caixa"] - 1) / (MAX_CAIXA - 1) * 100, 1),
-            "Acerto (%)": round(l["acertos"] / resp * 100, 1) if resp else None,
-            "Respostas": resp,
-        })
-    df = pd.DataFrame(rows)
+    _encerrar_sessao()
+    _iniciar_sessao(ids)
+    st.session_state["_fc_msg"] = f"Sessão de reforço montada ({len(ids)} cartões: {rotulo}). Abra a aba 📖 Estudar."
 
-    st.markdown("#### Por disciplina")
-    pesos = df.assign(_dom=df["Domínio (%)"] * df["Cartões"])
-    disc = pesos.groupby("Disciplina", as_index=False).agg(
-        Cartões=("Cartões", "sum"), **{"Para revisar hoje": ("Para revisar hoje", "sum")},
-        _dom=("_dom", "sum"), Assuntos=("Assunto", "nunique"))
-    disc["Domínio (%)"] = (disc["_dom"] / disc["Cartões"]).round(1)
-    acertos = {}
-    for l in linhas:
-        d = _rotulo_disc(por_id.get(l["baralho_id"], {}).get("disciplina"))
-        a = acertos.setdefault(d, [0, 0])
-        a[0] += l["acertos"]
-        a[1] += l["acertos"] + l["erros"]
-    disc["Acerto (%)"] = [round(acertos[d][0] / acertos[d][1] * 100, 1) if acertos[d][1] else None
-                          for d in disc["Disciplina"]]
-    barra = {c: st.column_config.ProgressColumn(c, format="%.1f%%", min_value=0, max_value=100)
-             for c in ("Domínio (%)", "Acerto (%)")}
-    st.dataframe(disc.drop(columns="_dom"), width="stretch", hide_index=True, column_config=barra)
-    st.caption("Domínio: posição média dos cartões nas caixas de revisão (0% = tudo na caixa 1, "
-               "100% = tudo na última). Acerto: respostas 'Acertei'/'Fácil' sobre o total.")
 
-    st.markdown("#### Por assunto")
-    filtro = st.multiselect("Disciplinas", sorted(df["Disciplina"].unique()), key="fc_desemp_disc")
-    ver = df[df["Disciplina"].isin(filtro)] if filtro else df
-    ver = ver.sort_values(["Disciplina", "Domínio (%)", "Assunto"])
-    st.dataframe(ver, width="stretch", hide_index=True, column_config=barra)
+def _cor_faixa():
+    return alt.Scale(domain=list(FAIXAS), range=list(FAIXAS.values()))
 
-    fracos = df[(df["Respostas"] >= 5) & (df["Acerto (%)"] < 70)].sort_values("Acerto (%)").head(5)
-    if not fracos.empty:
-        st.markdown("#### 🎯 Assuntos para reforçar")
-        st.dataframe(fracos[["Disciplina", "Assunto", "Acerto (%)", "Respostas", "Para revisar hoje"]],
-                     width="stretch", hide_index=True)
+
+def _aba_desempenho(db, login, baralhos):
+    c, l = dados_termometro(db, login, baralhos)
+    if c.empty:
+        st.info("Sem cartões ainda. Importe ou crie cartões para ver o termômetro.")
+        return
+    hoje = _hoje()
+    corte30, corte7 = (hoje - timedelta(days=30)).isoformat(), (hoje - timedelta(days=6)).isoformat()
+    l30 = l[l["dia"] >= corte30]
+    k = st.columns(5)
+    k[0].metric("Retenção (30 dias)", f"{(~l30['nota'].isin(RUIM)).mean() * 100:.0f}%" if len(l30) else "—",
+                help="Respostas Acertei/Fácil sobre o total nos últimos 30 dias.")
+    k[1].metric("Respostas (7 dias)", int((l["dia"] >= corte7).sum()))
+    k[2].metric("Sequência", f"{_sequencia(set(l['dia']))} dia(s)")
+    k[3].metric("Dominados", f"{(c['caixa'] >= 4).mean() * 100:.0f}%", help="Cartões nas caixas 4 e 5.")
+    k[4].metric("Vencidos hoje", int(c["venc"].sum()))
+
+    por_disc = indicadores(c, l, ["Disciplina"])
+    por_ass = indicadores(c, l, ["Disciplina", "Assunto"])
+    barra = {col: st.column_config.ProgressColumn(col, format="%.0f", min_value=0, max_value=100)
+             for col in ("Prioridade", "Retenção (%)", "Domínio (%)")}
+    cols = ["Situação", "Prioridade", "Retenção (%)", "Domínio (%)", "Não sei (%)", "Vencidos (%)",
+            "Cartões", "Respostas", "Base"]
+
+    st.markdown("#### 🌡️ Termômetro por disciplina")
+    st.altair_chart(alt.Chart(por_disc.dropna(subset=["Prioridade"])).mark_bar().encode(
+        x=alt.X("Prioridade:Q", scale=alt.Scale(domain=[0, 100]), title="Prioridade de reforço"),
+        y=alt.Y("Disciplina:N", sort="-x", title=None),
+        color=alt.Color("Situação:N", scale=_cor_faixa(), legend=alt.Legend(orient="bottom")),
+        tooltip=["Disciplina", "Prioridade", "Retenção (%)", "Domínio (%)", "Cartões"]))
+    st.dataframe(por_disc[["Disciplina"] + cols], width="stretch", hide_index=True, column_config=barra)
+    with st.expander("ℹ️ Como a prioridade é calculada"):
+        st.markdown(
+            "**Índice de prioridade de reforço (0 a 100)**, quanto maior, mais urgente:\n"
+            "- **45% erro**: 100% − retenção. Usa as respostas dos últimos 30 dias quando há pelo menos "
+            f"{MIN_RECENTE}; senão, o histórico do cartão (coluna *Base*).\n"
+            "- **25% falta de domínio**: cartões nas primeiras caixas da repetição espaçada.\n"
+            "- **15% 'não sei'**: não lembrar nada pesa mais do que lembrar errado.\n"
+            "- **15% atraso**: cartões vencidos e não revisados esquecem rápido (curva do esquecimento).\n\n"
+            "🔴 **Reforçar** ≥ 45 · 🟡 **Atenção** 25–44 · 🟢 **Em dia** < 25 · ⚪ ainda não revisado.")
+
+    st.markdown("#### 🎯 Tópicos para reforçar")
+    discs = sorted(c["Disciplina"].unique())
+    filtro = st.multiselect("Disciplinas", discs, key="fc_term_disc", placeholder="Todas")
+    ver = por_ass[por_ass["Disciplina"].isin(filtro)] if filtro else por_ass
+    alvo = ver[ver["Situação"].isin(["🔴 Reforçar", "🟡 Atenção"])].head(8)
+    if alvo.empty:
+        st.success("Nenhum assunto em alerta com esses filtros. 👏")
+    for i, r in enumerate(alvo.itertuples()):
+        a1, a2 = st.columns([5, 1])
+        ret = "—" if pd.isna(r.ret) else f"{r.ret * 100:.0f}%"
+        a1.markdown(f"{r.Situação} **{_esc(r.Assunto)}** · {_esc(r.Disciplina)}  \n"
+                    f"prioridade {r.Prioridade:.0f} · retenção {ret} · {r.Cartões} cartões · "
+                    f"{round(r.venc * r.Cartões)} vencidos")
+        sel = c[(c["Disciplina"] == r.Disciplina) & (c["Assunto"] == r.Assunto)].sort_values(["caixa", "prox"])
+        a2.button("▶ Treinar", key=f"fc_tr_{i}", width="stretch", on_click=_treinar,
+                  args=(list(sel["id"]), r.Assunto))
+    vermelhos = ver[ver["Situação"] == "🔴 Reforçar"]
+    if len(vermelhos) > 1:
+        ids = c.merge(vermelhos[["Disciplina", "Assunto"]], on=["Disciplina", "Assunto"]).sort_values("caixa")["id"]
+        st.button(f"🔥 Treinar todos os {len(vermelhos)} assuntos em vermelho", type="primary",
+                  on_click=_treinar, args=(list(ids), "assuntos em vermelho"))
+
+    st.markdown("#### 🗺️ Mapa dos assuntos")
+    st.caption("Canto inferior esquerdo = pouco domínio e baixa retenção: é onde está o maior retorno do estudo.")
+    pontos = ver.dropna(subset=["Retenção (%)"])
+    if not pontos.empty:
+        st.altair_chart(alt.Chart(pontos).mark_circle(opacity=0.8).encode(
+            x=alt.X("Domínio (%):Q", scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y("Retenção (%):Q", scale=alt.Scale(domain=[0, 100])),
+            size=alt.Size("Cartões:Q", legend=None), color=alt.Color("Situação:N", scale=_cor_faixa(), legend=None),
+            tooltip=["Disciplina", "Assunto", "Prioridade", "Retenção (%)", "Domínio (%)", "Cartões"]))
+    with st.expander("Tabela completa por assunto"):
+        st.dataframe(ver[["Disciplina", "Assunto"] + cols], width="stretch", hide_index=True, column_config=barra)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown("#### 📈 Retenção semanal")
+        if l.empty:
+            st.caption("Aparece depois das primeiras revisões.")
+        else:
+            ev = l.merge(c[["id", "Disciplina"]], on="id")
+            ev = ev.assign(Semana=pd.to_datetime(ev["dia"]).dt.to_period("W").dt.start_time,
+                           bom=~ev["nota"].isin(RUIM))
+            ev = ev.groupby(["Semana", "Disciplina"], as_index=False).agg(Retenção=("bom", "mean"), n=("bom", "size"))
+            ev["Retenção"] = (ev["Retenção"] * 100).round(1)
+            st.altair_chart(alt.Chart(ev).mark_line(point=True).encode(
+                x=alt.X("Semana:T", title=None), y=alt.Y("Retenção:Q", scale=alt.Scale(domain=[0, 100]), title="%"),
+                color=alt.Color("Disciplina:N", legend=alt.Legend(orient="bottom")),
+                tooltip=["Semana:T", "Disciplina", "Retenção", "n"]))
+    with g2:
+        st.markdown("#### 📅 Revisões previstas (14 dias)")
+        dias = [(hoje + timedelta(days=i)).isoformat() for i in range(14)]
+        prev = pd.DataFrame({"Dia": pd.to_datetime(dias),
+                             "Cartões": [int((c["prox"] <= dias[0]).sum())]
+                             + [int((c["prox"] == d).sum()) for d in dias[1:]]})
+        st.altair_chart(alt.Chart(prev).mark_bar().encode(
+            x=alt.X("Dia:T", title=None), y="Cartões:Q", tooltip=["Dia:T", "Cartões"]))
+        st.caption("Hoje inclui os atrasados.")
+
+    st.markdown("#### 🧱 Cartões-problema")
+    prob =c[(c["e"] + c["ns"] >= 4) & (c["a"] < (c["e"] + c["ns"]))].assign(
+        Falhas=lambda d: d["e"] + d["ns"]).sort_values("Falhas", ascending=False)
+    if prob.empty:
+        st.caption("Nenhum cartão com falhas repetidas. 👍")
+    else:
+        st.caption("Cartões que você erra mais do que acerta (4+ falhas). Costumam ser grandes demais ou ambíguos: "
+                   "divida em cartões menores, reescreva ou guarde nos ⭐ favoritos.")
+        st.dataframe(prob[["Disciplina", "Assunto", "Frente", "Falhas", "a", "caixa"]].rename(
+            columns={"a": "Acertos", "caixa": "Caixa"}).head(20), width="stretch", hide_index=True)
+        st.button(f"▶ Treinar os {min(len(prob), 30)} cartões-problema", key="fc_tr_prob", on_click=_treinar,
+                  args=(list(prob["id"].head(30)), "cartões-problema"))
 
 
 # ---- Importar ----
