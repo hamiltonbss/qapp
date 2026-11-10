@@ -12,6 +12,7 @@ import csv
 import html
 import io
 import random
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import altair as alt
@@ -71,6 +72,11 @@ def _hoje_str():
     return _hoje().isoformat()
 
 
+def normalizar_busca(s):
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return " ".join(s.lower().split())
+
+
 def _fmt_data(s):
     try:
         return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -103,6 +109,8 @@ def init_indexes(db):
                                             ("assunto", ASCENDING)], name="idx_fc_assunto"),
         lambda: db.fc_revisoes.create_index([("usuario_login", ASCENDING), ("dia", ASCENDING)],
                                             name="idx_fc_rev_dia"),
+        lambda: db.fc_conceitos.create_index([("usuario_login", ASCENDING), ("questao_id", ASCENDING)],
+                                             name="uq_fc_conceito", unique=True),
     ):
         try:
             fn()
@@ -456,8 +464,10 @@ def render_page(db, login):
     c3.metric("Cartões", sum(b["total"] for b in baralhos))
     c4.metric("Para revisar hoje", sum(b["hoje"] for b in baralhos))
 
-    t_desemp, t_estudar, t_baralhos, t_importar = st.tabs(
-        ["🌡️ Desempenho", "📖 Estudar", "🗃️ Baralhos e cartões", "📥 Importar"])
+    t_desemp, t_estudar, t_rev, t_baralhos, t_importar = st.tabs(
+        ["🌡️ Desempenho", "📖 Estudar", "🧠 Revisões", "🗃️ Baralhos e cartões", "📥 Importar"])
+    with t_rev:
+        _aba_revisoes(db, login)
     with t_desemp:
         _aba_desempenho(db, login, baralhos)
     with t_estudar:
@@ -1100,6 +1110,210 @@ def _aba_desempenho(db, login, baralhos):
             columns={"a": "Acertos", "caixa": "Caixa"}).head(20), width="stretch", hide_index=True)
         st.button(f"▶ Treinar os {min(len(prob), 30)} cartões-problema", key="fc_tr_prob", on_click=_treinar,
                   args=(list(prob["id"].head(30)), "cartões-problema"))
+
+
+# ---- Revisões: conceitos das questões erradas nos questionários ----
+REV_MAX = 40  # conceitos exibidos por disciplina
+
+
+def _gabarito(q):
+    c = (q.get("correta_text") or "").strip().upper()
+    if q.get("tipo") == "VF":
+        return "Certo (verdadeiro)" if c == "V" else "Errado (falso)"
+    alt = q.get(f"op_{c.lower()}") if c else None
+    return f"{c}) {alt}" if alt else c
+
+
+def _enunciado(q):
+    if q.get("tipo") == "VF":
+        return q.get("texto", "")
+    alts = [f"{l.upper()}) {q[f'op_{l}']}" for l in "abcde" if q.get(f"op_{l}")]
+    return "\n".join([q.get("texto", "")] + alts)
+
+
+def conceitos_errados(db, login):
+    """Uma entrada por questão que o usuário já errou (Praticar ou simulados), com disciplina,
+    gabarito e explicação. Cópias dos cadernos especiais contam na questão original."""
+    stats = {}
+    for r in db.respostas.find({"usuario_login": login}, {"questao_id": 1, "correto": 1, "respondido_em": 1}):
+        qid = r.get("questao_id")
+        if qid is not None:
+            stats.setdefault(qid, []).append((r.get("respondido_em") or "", bool(r.get("correto"))))
+    if not stats:
+        return []
+    qs = {q["_id"]: q for q in db.questoes.find({"_id": {"$in": list(stats)}})}
+    faltam = [q["origem_id"] for q in qs.values() if q.get("origem_id") and q["origem_id"] not in qs]
+    if faltam:
+        qs.update({q["_id"]: q for q in db.questoes.find({"_id": {"$in": faltam}})})
+    juntos = {}  # questão original -> eventos
+    for qid, evs in stats.items():
+        q = qs.get(qid)
+        if not q:
+            continue
+        orig = q.get("origem_id") if q.get("origem_id") in qs else qid
+        juntos.setdefault(orig, []).extend(evs)
+    quest = {x["_id"]: x for x in db.questionarios.find(
+        {"_id": {"$in": list({qs[i].get("questionario_id") for i in juntos})}}, {"nome": 1, "disciplina": 1})}
+    out = []
+    for qid, evs in juntos.items():
+        evs.sort()
+        erros = [e for e in evs if not e[1]]
+        if not erros:
+            continue
+        q, qn = qs[qid], quest.get(qs[qid].get("questionario_id")) or {}
+        disc = qn.get("disciplina") or ""
+        out.append({
+            "id": str(qid), "disciplina": SEM_DISCIPLINA if not disc or disc.startswith("—") or disc == "Sem Disciplina"
+            else disc, "questionario": qn.get("nome", "—"), "tipo": q.get("tipo"),
+            "texto": q.get("texto", ""), "enunciado": _enunciado(q), "gabarito": _gabarito(q),
+            "explicacao": (q.get("explicacao") or "").strip(), "tentativas": len(evs), "erros": len(erros),
+            "pendente": not evs[-1][1], "ultimo_erro": erros[-1][0]})
+    return out
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _conceitos_cache(_db, login):
+    return conceitos_errados(_db, login)
+
+
+def classificar_conceitos(itens, estado):
+    """Marca cada conceito como revisado quando há 'Entendi' posterior ao último erro.
+    Um erro novo depois do 'Entendi' traz o conceito de volta."""
+    for it in itens:
+        e = estado.get(it["id"]) or {}
+        it["revisado"] = bool(e.get("entendido_em")) and e["entendido_em"] >= it["ultimo_erro"]
+        it["reincidente"] = bool(e.get("entendido_em")) and not it["revisado"]
+        it["flashcard"] = bool(e.get("flashcard"))
+    return itens
+
+
+def _rev_marcar(db, login, qid, campos):
+    db.fc_conceitos.update_one({"usuario_login": login, "questao_id": qid}, {"$set": campos}, upsert=True)
+
+
+def _rev_entendi(db, login, ids, valor=True):
+    for qid in ids:
+        _rev_marcar(db, login, qid, {"entendido_em": _agora() if valor else None})
+
+
+def conceito_para_cartao(it):
+    frente = ("Certo ou errado? " if it["tipo"] == "VF" else "") + it["enunciado"]
+    verso = f"Gabarito: {it['gabarito']}" + (f"\n\n{it['explicacao']}" if it["explicacao"] else "")
+    return frente, verso, it["questionario"]
+
+
+def _rev_flashcards(db, login, itens):
+    novos = 0
+    por_disc = {}
+    for it in itens:
+        por_disc.setdefault(it["disciplina"], []).append(it)
+    for disc, lista in por_disc.items():
+        d = "" if disc == SEM_DISCIPLINA else disc
+        bid, _ = obter_ou_criar_baralho(db, login, f"Revisões · {disc}", d)
+        ins, _ = adicionar_cartoes(db, login, bid, [conceito_para_cartao(it) for it in lista])
+        novos += ins
+        for it in lista:
+            _rev_marcar(db, login, it["id"], {"flashcard": True})
+    st.session_state["_fc_msg"] = (f"{novos} flashcard(s) criado(s) nos baralhos \"Revisões · disciplina\"."
+                                   if novos else "Esses conceitos já estavam nos flashcards.")
+
+
+def resumo_texto(itens):
+    """Material de revisão em Markdown, agrupado por disciplina."""
+    linhas, atual = ["# Revisão de conceitos (questões erradas)"], None
+    for it in sorted(itens, key=lambda i: (i["disciplina"], -i["erros"])):
+        if it["disciplina"] != atual:
+            atual = it["disciplina"]
+            linhas += ["", f"## {atual}"]
+        linhas += ["", f"**{it['questionario']}** · errou {it['erros']} de {it['tentativas']}",
+                   it["explicacao"] or "_(sem explicação cadastrada)_",
+                   f"> Questão: {it['texto']}", f"> Gabarito: {it['gabarito']}"]
+    return "\n".join(linhas)
+
+
+def _aba_revisoes(db, login):
+    st.caption("Revisão direta dos conceitos: as **explicações** das questões que você errou nos questionários e "
+               "simulados, por disciplina. Leia o conceito antes do enunciado, marque **Entendi** quando fixar e "
+               "transforme em flashcard o que precisar de repetição.")
+    itens = [dict(i) for i in _conceitos_cache(db, login)]
+    if not itens:
+        st.info("Você ainda não errou questões nos questionários. Quando errar, as explicações aparecem aqui.")
+        return
+    estado = {d["questao_id"]: d for d in db.fc_conceitos.find({"usuario_login": login})}
+    classificar_conceitos(itens, estado)
+
+    a_rev = [i for i in itens if not i["revisado"]]
+    k = st.columns(4)
+    k[0].metric("Conceitos a revisar", len(a_rev))
+    k[1].metric("Ainda errando", sum(1 for i in a_rev if i["pendente"]),
+                help="A última tentativa na questão foi um erro.")
+    k[2].metric("Já revisados", len(itens) - len(a_rev))
+    k[3].metric("Sem explicação", sum(1 for i in a_rev if not i["explicacao"]),
+                help="Questões erradas sem explicação cadastrada. Adicione em Gerenciar.")
+
+    f1, f2, f3 = st.columns([2, 2, 1])
+    discs = sorted({i["disciplina"] for i in itens})
+    sel = f1.multiselect("Disciplinas", discs, key="fc_rev_disc", placeholder="Todas")
+    sit = f2.radio("Mostrar", ["A revisar", "Só as que ainda erro", "Reincidentes", "Já revisados"], horizontal=True,
+                   key="fc_rev_sit", help="Reincidentes: você marcou Entendi e depois errou a questão de novo.")
+    ordem = f3.selectbox("Ordem", ["Mais erradas", "Erro mais recente"], key="fc_rev_ordem")
+    g1, g2 = st.columns([3, 1])
+    busca = normalizar_busca(g1.text_input("Buscar no conceito ou na questão", key="fc_rev_busca"))
+    so_exp = g2.toggle("Só com explicação", value=True, key="fc_rev_exp")
+
+    ver = [i for i in itens
+           if (not sel or i["disciplina"] in sel)
+           and {"A revisar": not i["revisado"], "Só as que ainda erro": not i["revisado"] and i["pendente"],
+                "Reincidentes": i["reincidente"], "Já revisados": i["revisado"]}[sit]
+           and (i["explicacao"] or not so_exp)
+           and (not busca or busca in normalizar_busca(i["explicacao"] + " " + i["texto"]))]
+    ver.sort(key=(lambda i: (-i["erros"], i["ultimo_erro"])) if ordem == "Mais erradas"
+             else (lambda i: i["ultimo_erro"]), reverse=ordem != "Mais erradas")
+    if not ver:
+        st.success("Nada para revisar com esses filtros. 👏")
+        return
+
+    b1, b2, b3 = st.columns(3)
+    b1.button(f"🗂️ Transformar os {len(ver)} em flashcards", key="fc_rev_fc_todos", width="stretch",
+              on_click=_rev_flashcards, args=(db, login, ver),
+              help="Cria os cartões nos baralhos \"Revisões · disciplina\" (frente = questão, verso = gabarito "
+                   "+ explicação). Repetidos são ignorados.")
+    b2.download_button("⬇️ Baixar resumo (.md)", resumo_texto(ver).encode("utf-8"), "revisao_conceitos.md",
+                       "text/markdown", key="fc_rev_down")
+    if sit != "Já revisados":
+        b3.button("✅ Marcar todos como entendidos", key="fc_rev_ok_todos", width="stretch",
+                  on_click=_rev_entendi, args=(db, login, [i["id"] for i in ver]))
+
+    por_disc = {}
+    for i in ver:
+        por_disc.setdefault(i["disciplina"], []).append(i)
+    for disc in sorted(por_disc, key=lambda d: -len(por_disc[d])):
+        lista = por_disc[disc]
+        with st.expander(f"📚 {disc} — {len(lista)} conceito(s)", expanded=len(por_disc) == 1):
+            for it in lista[:REV_MAX]:
+                with st.container(border=True):
+                    selo = ("🔁 reincidente · " if it["reincidente"] else "") + ("🗂️ já é flashcard · " if it["flashcard"] else "")
+                    st.caption(f"{selo}{it['questionario']} · errou {it['erros']} de {it['tentativas']} · "
+                               + ("última tentativa: ❌" if it["pendente"] else "última tentativa: ✅")
+                               + f" · último erro em {_fmt_data(it['ultimo_erro'][:10])}")
+                    if it["explicacao"]:
+                        st.markdown(it["explicacao"])
+                    else:
+                        st.warning("Sem explicação cadastrada. Gabarito: " + it["gabarito"])
+                    c1, c2, c3 = st.columns(3)
+                    with c1.popover("📄 Ver questão"):
+                        st.text(it["enunciado"])
+                        st.markdown(f"**Gabarito:** {it['gabarito']}")
+                    if it["revisado"]:
+                        c2.button("↩️ Voltar para revisão", key=f"fc_rev_un_{it['id']}", width="stretch",
+                                  on_click=_rev_entendi, args=(db, login, [it["id"]], False))
+                    else:
+                        c2.button("✅ Entendi", key=f"fc_rev_ok_{it['id']}", width="stretch", type="primary",
+                                  on_click=_rev_entendi, args=(db, login, [it["id"]]))
+                    c3.button("🗂️ Virar flashcard", key=f"fc_rev_fc_{it['id']}", width="stretch",
+                              disabled=it["flashcard"], on_click=_rev_flashcards, args=(db, login, [it]))
+            if len(lista) > REV_MAX:
+                st.caption(f"Mostrando {REV_MAX} de {len(lista)}. Marque como entendidos ou use a busca para ver os demais.")
 
 
 # ---- Importar ----
