@@ -863,12 +863,46 @@ def _cor_faixa():
     return alt.Scale(domain=list(FAIXAS), range=list(FAIXAS.values()))
 
 
+def tendencia(c, l, chaves, dias=14):
+    """Variação da retenção (pontos percentuais): últimos `dias` × os `dias` anteriores.
+    Só aparece para grupos com pelo menos 3 respostas em cada período."""
+    hoje = _hoje()
+    c1, c0 = (hoje - timedelta(days=dias)).isoformat(), (hoje - timedelta(days=2 * dias)).isoformat()
+    ev = l[l["dia"] > c0].merge(c[["id"] + chaves], on="id")
+    if ev.empty:
+        return pd.DataFrame(columns=chaves + ["Tendência (pp)"])
+    ev = ev.assign(bom=~ev["nota"].isin(RUIM), agora=ev["dia"] > c1)
+    g = ev.groupby(chaves + ["agora"]).agg(ret=("bom", "mean"), n=("bom", "size")).reset_index()
+    m = g[g["agora"]].merge(g[~g["agora"]], on=chaves, suffixes=("_a", "_b"))
+    m = m[(m["n_a"] >= 3) & (m["n_b"] >= 3)]
+    m["Tendência (pp)"] = ((m["ret_a"] - m["ret_b"]) * 100).round(0)
+    return m[chaves + ["Tendência (pp)"]]
+
+
+def _seta(v):
+    if pd.isna(v):
+        return "—"
+    return f"▲ +{v:.0f}" if v >= 5 else f"▼ {v:.0f}" if v <= -5 else f"● {v:+.0f}"
+
+
+CORES_CAIXA = ["#d64545", "#e88a3c", "#e0a526", "#8fbf4d", "#2e9e5b"]
+MAX_BARRAS = 25  # assuntos por gráfico
+
+
 def _aba_desempenho(db, login, baralhos):
     c, l = dados_termometro(db, login, baralhos)
     if c.empty:
         st.info("Sem cartões ainda. Importe ou crie cartões para ver o termômetro.")
         return
     hoje = _hoje()
+    filtro = st.multiselect("Disciplinas", sorted(c["Disciplina"].unique()), key="fc_term_disc", placeholder="Todas",
+                            help="Filtra todo o painel. Com uma disciplina só, os gráficos mostram os assuntos dela.")
+    if filtro:
+        c = c[c["Disciplina"].isin(filtro)]
+        l = l[l["id"].isin(set(c["id"]))]
+    varias = c["Disciplina"].nunique() > 1
+    c = c.assign(Tópico=c["Assunto"] + " · " + c["Disciplina"] if varias else c["Assunto"])
+
     corte30, corte7 = (hoje - timedelta(days=30)).isoformat(), (hoje - timedelta(days=6)).isoformat()
     l30 = l[l["dia"] >= corte30]
     k = st.columns(5)
@@ -879,20 +913,43 @@ def _aba_desempenho(db, login, baralhos):
     k[3].metric("Dominados", f"{(c['caixa'] >= 4).mean() * 100:.0f}%", help="Cartões nas caixas 4 e 5.")
     k[4].metric("Vencidos hoje", int(c["venc"].sum()))
 
-    por_disc = indicadores(c, l, ["Disciplina"])
-    por_ass = indicadores(c, l, ["Disciplina", "Assunto"])
+    ch = ["Disciplina", "Assunto", "Tópico"]
+    por_ass = indicadores(c, l, ch).merge(tendencia(c, l, ch), on=ch, how="left")
+    por_ass["Tendência"] = por_ass["Tendência (pp)"].map(_seta)
     barra = {col: st.column_config.ProgressColumn(col, format="%.0f", min_value=0, max_value=100)
              for col in ("Prioridade", "Retenção (%)", "Domínio (%)")}
     cols = ["Situação", "Prioridade", "Retenção (%)", "Domínio (%)", "Não sei (%)", "Vencidos (%)",
             "Cartões", "Respostas", "Base"]
+    cont = por_ass["Situação"].value_counts()
+    st.markdown("**Assuntos:** " + " · ".join(f"{f} {int(cont.get(f, 0))}" for f in FAIXAS))
 
-    st.markdown("#### 🌡️ Termômetro por disciplina")
-    st.altair_chart(alt.Chart(por_disc.dropna(subset=["Prioridade"])).mark_bar().encode(
-        x=alt.X("Prioridade:Q", scale=alt.Scale(domain=[0, 100]), title="Prioridade de reforço"),
-        y=alt.Y("Disciplina:N", sort="-x", title=None),
-        color=alt.Color("Situação:N", scale=_cor_faixa(), legend=alt.Legend(orient="bottom")),
-        tooltip=["Disciplina", "Prioridade", "Retenção (%)", "Domínio (%)", "Cartões"]))
-    st.dataframe(por_disc[["Disciplina"] + cols], width="stretch", hide_index=True, column_config=barra)
+    if varias:
+        por_disc = indicadores(c, l, ["Disciplina"])
+        with st.expander("🌡️ Visão por disciplina"):
+            st.altair_chart(alt.Chart(por_disc.dropna(subset=["Prioridade"])).mark_bar().encode(
+                x=alt.X("Prioridade:Q", scale=alt.Scale(domain=[0, 100]), title="Prioridade de reforço"),
+                y=alt.Y("Disciplina:N", sort="-x", title=None),
+                color=alt.Color("Situação:N", scale=_cor_faixa(), legend=None),
+                tooltip=["Disciplina", "Prioridade", "Retenção (%)", "Domínio (%)", "Cartões"]))
+            st.dataframe(por_disc[["Disciplina"] + cols], width="stretch", hide_index=True, column_config=barra)
+
+    # ---- Termômetro por assunto ----
+    st.markdown("#### 🌡️ Termômetro por assunto")
+    medidos = por_ass.dropna(subset=["Prioridade"])
+    topo = medidos.head(MAX_BARRAS)
+    ordem = list(topo["Tópico"])
+    if topo.empty:
+        st.caption("Aparece depois das primeiras revisões.")
+    else:
+        st.altair_chart(alt.Chart(topo).mark_bar().encode(
+            x=alt.X("Prioridade:Q", scale=alt.Scale(domain=[0, 100]), title="Prioridade de reforço"),
+            y=alt.Y("Tópico:N", sort=ordem, title=None, axis=alt.Axis(labelLimit=320)),
+            color=alt.Color("Situação:N", scale=_cor_faixa(), legend=alt.Legend(orient="bottom")),
+            tooltip=["Assunto", "Disciplina", "Prioridade", "Retenção (%)", "Domínio (%)", "Não sei (%)",
+                     "Vencidos (%)", "Cartões", "Tendência"]).properties(height=max(120, 26 * len(topo))))
+        if len(medidos) > MAX_BARRAS:
+            st.caption(f"Mostrando os {MAX_BARRAS} assuntos mais urgentes de {len(medidos)}. "
+                       "Filtre por disciplina para ver os demais.")
     with st.expander("ℹ️ Como a prioridade é calculada"):
         st.markdown(
             "**Índice de prioridade de reforço (0 a 100)**, quanto maior, mais urgente:\n"
@@ -901,69 +958,138 @@ def _aba_desempenho(db, login, baralhos):
             "- **25% falta de domínio**: cartões nas primeiras caixas da repetição espaçada.\n"
             "- **15% 'não sei'**: não lembrar nada pesa mais do que lembrar errado.\n"
             "- **15% atraso**: cartões vencidos e não revisados esquecem rápido (curva do esquecimento).\n\n"
-            "🔴 **Reforçar** ≥ 45 · 🟡 **Atenção** 25–44 · 🟢 **Em dia** < 25 · ⚪ ainda não revisado.")
+            "🔴 **Reforçar** ≥ 45 · 🟡 **Atenção** 25–44 · 🟢 **Em dia** < 25 · ⚪ ainda não revisado.\n\n"
+            "**Tendência**: variação da retenção nos últimos 14 dias contra os 14 anteriores, em pontos "
+            "percentuais (precisa de 3 respostas em cada período).")
+    with st.expander("Tabela completa por assunto"):
+        st.dataframe(por_ass[["Disciplina", "Assunto"] + cols[:2] + ["Tendência"] + cols[2:]], width="stretch",
+                     hide_index=True, column_config=barra)
 
+    # ---- Tópicos para reforçar ----
     st.markdown("#### 🎯 Tópicos para reforçar")
-    discs = sorted(c["Disciplina"].unique())
-    filtro = st.multiselect("Disciplinas", discs, key="fc_term_disc", placeholder="Todas")
-    ver = por_ass[por_ass["Disciplina"].isin(filtro)] if filtro else por_ass
-    alvo = ver[ver["Situação"].isin(["🔴 Reforçar", "🟡 Atenção"])].head(8)
+    alvo = por_ass[por_ass["Situação"].isin(["🔴 Reforçar", "🟡 Atenção"])].head(8)
     if alvo.empty:
         st.success("Nenhum assunto em alerta com esses filtros. 👏")
     for i, r in enumerate(alvo.itertuples()):
         a1, a2 = st.columns([5, 1])
         ret = "—" if pd.isna(r.ret) else f"{r.ret * 100:.0f}%"
         a1.markdown(f"{r.Situação} **{_esc(r.Assunto)}** · {_esc(r.Disciplina)}  \n"
-                    f"prioridade {r.Prioridade:.0f} · retenção {ret} · {r.Cartões} cartões · "
-                    f"{round(r.venc * r.Cartões)} vencidos")
-        sel = c[(c["Disciplina"] == r.Disciplina) & (c["Assunto"] == r.Assunto)].sort_values(["caixa", "prox"])
+                    f"prioridade {r.Prioridade:.0f} · retenção {ret} · tendência {r.Tendência} · "
+                    f"{r.Cartões} cartões · {round(r.venc * r.Cartões)} vencidos")
+        sel = c[c["Tópico"] == r.Tópico].sort_values(["caixa", "prox"])
         a2.button("▶ Treinar", key=f"fc_tr_{i}", width="stretch", on_click=_treinar,
                   args=(list(sel["id"]), r.Assunto))
-    vermelhos = ver[ver["Situação"] == "🔴 Reforçar"]
+    vermelhos = por_ass[por_ass["Situação"] == "🔴 Reforçar"]
     if len(vermelhos) > 1:
-        ids = c.merge(vermelhos[["Disciplina", "Assunto"]], on=["Disciplina", "Assunto"]).sort_values("caixa")["id"]
+        ids = c[c["Tópico"].isin(set(vermelhos["Tópico"]))].sort_values("caixa")["id"]
         st.button(f"🔥 Treinar todos os {len(vermelhos)} assuntos em vermelho", type="primary",
                   on_click=_treinar, args=(list(ids), "assuntos em vermelho"))
 
+    # ---- Estágio de aprendizado ----
+    st.markdown("#### 📦 Estágio de aprendizado por assunto")
+    st.caption("Em que caixa da repetição espaçada estão os cartões de cada assunto. Muito vermelho = ainda não "
+               "fixou; muito verde = memória que já resistiu a intervalos longos.")
+    ordem_cx = ordem or list(por_ass["Tópico"].head(MAX_BARRAS))
+    cx = c[c["Tópico"].isin(ordem_cx)].groupby(["Tópico", "caixa"]).size().reset_index(name="Cartões")
+    cx["Caixa"] = "Caixa " + cx["caixa"].astype(str)
+    caixas = [f"Caixa {i}" for i in range(1, MAX_CAIXA + 1)]
+    st.altair_chart(alt.Chart(cx).mark_bar().encode(
+        x=alt.X("Cartões:Q", stack="normalize", axis=alt.Axis(format="%"), title="Cartões do assunto"),
+        y=alt.Y("Tópico:N", sort=ordem_cx, title=None, axis=alt.Axis(labelLimit=320)),
+        color=alt.Color("Caixa:N", scale=alt.Scale(domain=caixas, range=CORES_CAIXA),
+                        legend=alt.Legend(orient="bottom", title=None)),
+        order=alt.Order("caixa:Q"), tooltip=["Tópico", "Caixa", "Cartões"],
+    ).properties(height=max(120, 26 * len(ordem_cx))))
+
+    # ---- Mapa ----
     st.markdown("#### 🗺️ Mapa dos assuntos")
     st.caption("Canto inferior esquerdo = pouco domínio e baixa retenção: é onde está o maior retorno do estudo.")
-    pontos = ver.dropna(subset=["Retenção (%)"])
+    pontos = por_ass.dropna(subset=["Retenção (%)"])
     if not pontos.empty:
         st.altair_chart(alt.Chart(pontos).mark_circle(opacity=0.8).encode(
             x=alt.X("Domínio (%):Q", scale=alt.Scale(domain=[0, 100])),
             y=alt.Y("Retenção (%):Q", scale=alt.Scale(domain=[0, 100])),
             size=alt.Size("Cartões:Q", legend=None), color=alt.Color("Situação:N", scale=_cor_faixa(), legend=None),
-            tooltip=["Disciplina", "Assunto", "Prioridade", "Retenção (%)", "Domínio (%)", "Cartões"]))
-    with st.expander("Tabela completa por assunto"):
-        st.dataframe(ver[["Disciplina", "Assunto"] + cols], width="stretch", hide_index=True, column_config=barra)
+            tooltip=["Disciplina", "Assunto", "Prioridade", "Retenção (%)", "Domínio (%)", "Cartões", "Tendência"]))
 
-    g1, g2 = st.columns(2)
-    with g1:
-        st.markdown("#### 📈 Retenção semanal")
-        if l.empty:
-            st.caption("Aparece depois das primeiras revisões.")
-        else:
-            ev = l.merge(c[["id", "Disciplina"]], on="id")
-            ev = ev.assign(Semana=pd.to_datetime(ev["dia"]).dt.to_period("W").dt.start_time,
-                           bom=~ev["nota"].isin(RUIM))
-            ev = ev.groupby(["Semana", "Disciplina"], as_index=False).agg(Retenção=("bom", "mean"), n=("bom", "size"))
-            ev["Retenção"] = (ev["Retenção"] * 100).round(1)
-            st.altair_chart(alt.Chart(ev).mark_line(point=True).encode(
-                x=alt.X("Semana:T", title=None), y=alt.Y("Retenção:Q", scale=alt.Scale(domain=[0, 100]), title="%"),
-                color=alt.Color("Disciplina:N", legend=alt.Legend(orient="bottom")),
-                tooltip=["Semana:T", "Disciplina", "Retenção", "n"]))
-    with g2:
-        st.markdown("#### 📅 Revisões previstas (14 dias)")
-        dias = [(hoje + timedelta(days=i)).isoformat() for i in range(14)]
-        prev = pd.DataFrame({"Dia": pd.to_datetime(dias),
-                             "Cartões": [int((c["prox"] <= dias[0]).sum())]
-                             + [int((c["prox"] == d).sum()) for d in dias[1:]]})
-        st.altair_chart(alt.Chart(prev).mark_bar().encode(
-            x=alt.X("Dia:T", title=None), y="Cartões:Q", tooltip=["Dia:T", "Cartões"]))
-        st.caption("Hoje inclui os atrasados.")
+    # ---- Evolução ----
+    st.markdown("#### 📈 Evolução semanal por assunto")
+    ev = l.merge(c[["id", "Tópico"]], on="id")
+    if ev.empty:
+        st.caption("Aparece depois das primeiras revisões.")
+    else:
+        ev = ev.assign(Semana=pd.to_datetime(ev["dia"]).dt.to_period("W").dt.start_time, bom=~ev["nota"].isin(RUIM))
+        mais = [t for t in ordem if t in set(ev["Tópico"])][:15] or list(ev["Tópico"].value_counts().index[:15])
+        hm = ev[ev["Tópico"].isin(mais)].groupby(["Semana", "Tópico"], as_index=False).agg(
+            Retenção=("bom", "mean"), Respostas=("bom", "size"))
+        hm["Retenção"] = (hm["Retenção"] * 100).round(0)
+        hm["Sem"] = hm["Semana"].dt.strftime("%d/%m")
+        semanas = list(hm.sort_values("Semana")["Sem"].drop_duplicates())
+        base = alt.Chart(hm).encode(x=alt.X("Sem:O", sort=semanas, title="Semana (início)"),
+                                    y=alt.Y("Tópico:N", sort=mais, title=None, axis=alt.Axis(labelLimit=320)))
+        st.altair_chart((base.mark_rect().encode(
+            color=alt.Color("Retenção:Q", scale=alt.Scale(domain=[0, 100], scheme="redyellowgreen"), legend=None),
+            tooltip=["Tópico", "Sem", "Retenção", "Respostas"]) + base.mark_text(fontSize=11).encode(
+            text=alt.Text("Retenção:Q", format=".0f"))).properties(height=max(120, 28 * len(mais))))
+        st.caption("Retenção (%) de cada assunto por semana, nos 15 mais urgentes. Linha que vai do vermelho ao "
+                   "verde = o reforço está funcionando; em branco = semana sem revisão do assunto.")
+
+    # ---- Raio-X ----
+    st.markdown("#### 🔎 Raio-X de um assunto")
+    topicos = list(por_ass["Tópico"])
+    top = st.selectbox("Assunto", topicos, key="fc_raiox") if topicos else None
+    if top:
+        r = por_ass[por_ass["Tópico"] == top].iloc[0]
+        ca = c[c["Tópico"] == top]
+        fmt = lambda v, s="": "—" if pd.isna(v) else f"{v:.0f}{s}"
+        m = st.columns(6)
+        m[0].metric("Situação", r["Situação"].split(" ", 1)[1])
+        m[1].metric("Prioridade", fmt(r["Prioridade"]))
+        m[2].metric("Retenção", fmt(r["Retenção (%)"], "%"), None if pd.isna(r["Tendência (pp)"])
+                    else f"{r['Tendência (pp)']:+.0f} pp")
+        m[3].metric("Domínio", fmt(r["Domínio (%)"], "%"))
+        m[4].metric("Cartões", int(r["Cartões"]))
+        m[5].metric("Vencidos", int(ca["venc"].sum()))
+        x1, x2 = st.columns(2)
+        with x1:
+            ea = l[l["id"].isin(set(ca["id"]))]
+            if ea.empty:
+                st.caption("Sem revisões registradas neste assunto ainda.")
+            else:
+                ea = ea.assign(Semana=pd.to_datetime(ea["dia"]).dt.to_period("W").dt.start_time,
+                               bom=~ea["nota"].isin(RUIM))
+                ea = ea.groupby("Semana", as_index=False).agg(Retenção=("bom", "mean"), Respostas=("bom", "size"))
+                ea["Retenção"] = (ea["Retenção"] * 100).round(1)
+                st.altair_chart(alt.Chart(ea).mark_line(point=True).encode(
+                    x=alt.X("Semana:T", title=None),
+                    y=alt.Y("Retenção:Q", scale=alt.Scale(domain=[0, 100]), title="Retenção (%)"),
+                    tooltip=["Semana:T", "Retenção", "Respostas"]).properties(height=220))
+        with x2:
+            dist = ca.groupby("caixa").size().reindex(range(1, MAX_CAIXA + 1), fill_value=0).reset_index(name="Cartões")
+            dist["Caixa"] = "Caixa " + dist["caixa"].astype(str)
+            st.altair_chart(alt.Chart(dist).mark_bar().encode(
+                x=alt.X("Caixa:N", sort=caixas, title=None), y="Cartões:Q",
+                color=alt.Color("Caixa:N", scale=alt.Scale(domain=caixas, range=CORES_CAIXA), legend=None),
+                tooltip=["Caixa", "Cartões"]).properties(height=220))
+        det = ca.assign(Falhas=ca["e"] + ca["ns"]).sort_values(["caixa", "Falhas"], ascending=[True, False])
+        st.dataframe(det[["Frente", "caixa", "a", "e", "ns", "prox"]].rename(columns={
+            "caixa": "Caixa", "a": "Acertos", "e": "Erros", "ns": "Não sei", "prox": "Próxima revisão"}),
+            width="stretch", hide_index=True)
+        st.button(f"▶ Treinar este assunto ({len(det)} cartões)", key="fc_tr_raiox", on_click=_treinar,
+                  args=(list(det["id"]), r["Assunto"]))
+
+    # ---- Agenda e cartões-problema ----
+    st.markdown("#### 📅 Revisões previstas (14 dias)")
+    dias = [(hoje + timedelta(days=i)).isoformat() for i in range(14)]
+    prev = pd.DataFrame({"Dia": pd.to_datetime(dias),
+                         "Cartões": [int((c["prox"] <= dias[0]).sum())]
+                         + [int((c["prox"] == d).sum()) for d in dias[1:]]})
+    st.altair_chart(alt.Chart(prev).mark_bar().encode(
+        x=alt.X("Dia:T", title=None), y="Cartões:Q", tooltip=["Dia:T", "Cartões"]).properties(height=200))
+    st.caption("Hoje inclui os atrasados.")
 
     st.markdown("#### 🧱 Cartões-problema")
-    prob =c[(c["e"] + c["ns"] >= 4) & (c["a"] < (c["e"] + c["ns"]))].assign(
+    prob = c[(c["e"] + c["ns"] >= 4) & (c["a"] < (c["e"] + c["ns"]))].assign(
         Falhas=lambda d: d["e"] + d["ns"]).sort_values("Falhas", ascending=False)
     if prob.empty:
         st.caption("Nenhum cartão com falhas repetidas. 👍")
