@@ -513,16 +513,20 @@ def _iniciar_sessao(ids, inverter=False):
 
 # ---- Sessão do dia: meta fixa, equilibrada entre as disciplinas ----
 META_PADRAO = {"meta": 40, "novos": 5}
+DIVISOES = {"inteligente": "Inteligente: mais vagas para as disciplinas mais fracas",
+            "igual": "Igual: mesma quantidade para cada disciplina"}
 
 
 def config_usuario(db, login):
     d = db.fc_config.find_one({"usuario_login": login}) or {}
     meta = int(d.get("meta") or META_PADRAO["meta"])
-    return {"meta": meta, "novos": min(meta, int(d.get("novos", META_PADRAO["novos"])))}
+    return {"meta": meta, "novos": min(meta, int(d.get("novos", META_PADRAO["novos"]))),
+            "divisao": d.get("divisao") if d.get("divisao") in DIVISOES else "inteligente"}
 
 
-def salvar_config(db, login, meta, novos):
-    db.fc_config.update_one({"usuario_login": login}, {"$set": {"meta": int(meta), "novos": int(novos)}}, upsert=True)
+def salvar_config(db, login, meta, novos, divisao="inteligente"):
+    db.fc_config.update_one({"usuario_login": login},
+                            {"$set": {"meta": int(meta), "novos": int(novos), "divisao": divisao}}, upsert=True)
     st.session_state["_fc_msg"] = f"Meta diária salva: {int(meta)} cartões por dia, até {int(novos)} novos."
 
 
@@ -536,23 +540,49 @@ def progresso_hoje(db, login):
     return {"feitos": len(feitos), "novos": len(novos)}
 
 
-def repartir(contagens, n):
-    """Divide n vagas em partes iguais entre os grupos; quem tem menos cartões que a sua parte
-    cede a sobra aos demais. Ex.: 30 vagas, grupos com 200/30/5 cartões -> 13/12/5."""
+def repartir(contagens, n, pesos=None, minimo=0):
+    """Divide n vagas entre os grupos, sem passar do nº de cartões de cada um.
+    Sem pesos, a divisão é igual (ex.: 30 vagas, grupos com 200/30/5 cartões -> 13/12/5).
+    Com pesos, cada grupo recebe na proporção do seu peso; `minimo` garante que nenhum grupo
+    com cartões fique de fora. A sobra de quem tem poucos cartões vai para os demais."""
+    pesos = pesos or {}
+    w = {g: max(0.01, float(pesos.get(g, 1))) for g in contagens}
     alloc, resto = {g: 0 for g in contagens}, max(0, int(n))
+    for g in sorted(contagens, key=lambda g: (-w[g], str(g))):  # piso para todos
+        t = min(int(minimo), contagens[g], resto)
+        alloc[g] += t
+        resto -= t
     while resto > 0:
         abertos = sorted((g for g in contagens if alloc[g] < contagens[g]),
-                         key=lambda g: (-(contagens[g] - alloc[g]), str(g)))
+                         key=lambda g: (-w[g], -(contagens[g] - alloc[g]), str(g)))
         if not abertos:
             break
-        parte = max(1, resto // len(abertos))
+        soma, base, dado = sum(w[g] for g in abertos), resto, 0
         for g in abertos:
-            t = min(parte, contagens[g] - alloc[g], resto)
+            t = min(int(base * w[g] / soma), contagens[g] - alloc[g], resto)
             alloc[g] += t
             resto -= t
-            if not resto:
-                break
+            dado += t
+        if not dado:  # sobras menores que uma vaga inteira: uma para cada, do maior peso ao menor
+            for g in abertos:
+                if not resto:
+                    break
+                alloc[g] += 1
+                resto -= 1
     return alloc
+
+
+def pesos_do_termometro(por_disc):
+    """Pesos da divisão inteligente, a partir do termômetro por disciplina.
+    Revisões: 1 + 2 × prioridade/100 (de 1 a 3: disciplina em 🔴 recebe até o triplo de uma em dia).
+    Novos: 1 + parte ainda não estudada (de 1 a 2: quem tem menos cobertura recebe mais novos)."""
+    rev, nov, sit = {}, {}, {}
+    for r in por_disc.to_dict("records"):
+        d, p = r["Disciplina"], r.get("Prioridade")
+        rev[d] = 1.0 if pd.isna(p) else round(1 + 2 * p / 100, 2)
+        nov[d] = round(2 - (r.get("Cobertura (%)") or 0) / 100, 2)
+        sit[d] = r.get("Situação", "")
+    return rev, nov, sit
 
 
 def _urgencia(c, hoje):
@@ -576,11 +606,13 @@ def _intercalar(grupos):
     return out
 
 
-def sessao_do_dia(cartoes, disc_de, meta, novos_dia, feitos=0, novos_feitos=0, hoje=None):
+def sessao_do_dia(cartoes, disc_de, meta, novos_dia, feitos=0, novos_feitos=0, hoje=None,
+                  pesos_rev=None, pesos_novos=None, situacao=None):
     """Fila do dia com tamanho fixo.
     - vagas = meta - cartões já feitos hoje;
     - até `novos_dia` vagas vão para cartões novos, o resto para revisões vencidas;
-    - as vagas são repartidas igualmente entre as disciplinas (repartir);
+    - as vagas são repartidas entre as disciplinas (repartir): em partes iguais ou, com pesos,
+      dando mais vagas às disciplinas mais fracas no termômetro (mínimo de 2 por disciplina);
     - dentro da disciplina entram primeiro as revisões mais urgentes (_urgencia);
     - a fila sai intercalada entre as disciplinas.
     Retorna (fila, resumo por disciplina, info)."""
@@ -601,11 +633,12 @@ def sessao_do_dia(cartoes, disc_de, meta, novos_dia, feitos=0, novos_feitos=0, h
     tot_novos = sum(len(g["novos"]) for g in grupos.values())
     q_novos = min(max(0, int(novos_dia) - int(novos_feitos)), tot_novos, vagas)
     q_rev = min(tot_venc, vagas - q_novos)
-    a_rev = repartir({d: len(g["venc"]) for d, g in grupos.items()}, q_rev)
-    a_nov = repartir({d: len(g["novos"]) for d, g in grupos.items()}, q_novos)
+    a_rev = repartir({d: len(g["venc"]) for d, g in grupos.items()}, q_rev, pesos_rev, 2 if pesos_rev else 0)
+    a_nov = repartir({d: len(g["novos"]) for d, g in grupos.items()}, q_novos, pesos_novos)
     ordem = sorted(grupos, key=lambda d: (-a_rev[d] - a_nov[d], d))
     fila = _intercalar([grupos[d]["venc"][:a_rev[d]] + grupos[d]["novos"][:a_nov[d]] for d in ordem])
-    resumo = [{"Disciplina": d, "Revisões hoje": a_rev[d], "Novos hoje": a_nov[d],
+    resumo = [{"Disciplina": d, "Situação": (situacao or {}).get(d, ""),
+               "Peso": (pesos_rev or {}).get(d, 1), "Revisões hoje": a_rev[d], "Novos hoje": a_nov[d],
                "Revisões acumuladas": len(grupos[d]["venc"]), "Novos disponíveis": len(grupos[d]["novos"])}
               for d in ordem if grupos[d]["venc"] or grupos[d]["novos"]]
     info = {"vagas": vagas, "revisoes": q_rev, "novos": q_novos, "acumuladas": tot_venc, "novos_total": tot_novos}
@@ -618,7 +651,15 @@ def _painel_do_dia(db, login, baralhos, cfg, prog):
                                       {"baralho_id": 1, "caixa": 1, "proxima_revisao": 1, "revisoes": 1, "criado_em": 1}))
     extra = int(st.session_state.get("fc_extra_dia") or 0) if st.session_state.get("fc_extra_data") == _hoje_str() else 0
     meta = cfg["meta"] + extra
-    fila, resumo, info = sessao_do_dia(cartoes, disc_de, meta, cfg["novos"], prog["feitos"], prog["novos"])
+    pr = pn = sit = None
+    if cfg.get("divisao") == "inteligente":
+        ct, lt = dados_termometro(db, login, baralhos)
+        if not ct.empty:
+            pr, pn, sit = pesos_do_termometro(indicadores(ct, lt, ["Disciplina"]))
+    fila, resumo, info = sessao_do_dia(cartoes, disc_de, meta, cfg["novos"], prog["feitos"], prog["novos"],
+                                       pesos_rev=pr, pesos_novos=pn, situacao=sit)
+    if not pr:
+        resumo = [{k_: v for k_, v in r.items() if k_ not in ("Situação", "Peso")} for r in resumo]
 
     st.markdown("#### 📅 Sessão do dia")
     k = st.columns(4)
@@ -638,8 +679,11 @@ def _painel_do_dia(db, login, baralhos, cfg, prog):
         if st.button(f"▶ Começar a sessão do dia ({len(fila)} cartões)", type="primary", key="fc_dia_ir"):
             _iniciar_sessao([str(c["_id"]) for c in fila])
             st.rerun()
-        st.caption("As vagas do dia são divididas igualmente entre as disciplinas, e os cartões saem alternados. "
-                   "Errar um cartão o traz de volta na mesma sessão, sem gastar outra vaga.")
+        st.caption(("Divisão inteligente: cada disciplina recebe vagas na proporção do **peso** (de 1 a 3), que sobe "
+                    "com a prioridade de reforço do termômetro. Toda disciplina com revisão vencida recebe pelo "
+                    "menos 2 vagas. Os novos vão mais para as disciplinas com menos cartões já estudados. "
+                    if pr else "As vagas do dia são divididas igualmente entre as disciplinas. ")
+                   + "Os cartões saem alternados; errar um cartão o traz de volta na mesma sessão, sem gastar outra vaga.")
     elif not info["vagas"]:
         st.success(f"🎯 Meta do dia cumprida: {prog['feitos']} cartões. O que sobrou fica para amanhã.")
         if (info["acumuladas"] or info["novos_total"]) and st.button("➕ Estudar mais 10 hoje", key="fc_dia_mais"):
@@ -655,7 +699,10 @@ def _painel_do_dia(db, login, baralhos, cfg, prog):
         m1, m2 = st.columns(2)
         nova = m1.number_input("Cartões por dia", 5, 300, cfg["meta"], step=5, key="fc_cfg_meta")
         novos = m2.number_input("Dos quais, novos (no máximo)", 0, 300, cfg["novos"], step=1, key="fc_cfg_novos")
-        st.button("Salvar meta", key="fc_cfg_salvar", on_click=salvar_config, args=(db, login, nova, min(novos, nova)))
+        div = st.radio("Divisão entre as disciplinas", list(DIVISOES), format_func=DIVISOES.get, key="fc_cfg_div",
+                       index=list(DIVISOES).index(cfg.get("divisao", "inteligente")))
+        st.button("Salvar meta", key="fc_cfg_salvar", on_click=salvar_config,
+                  args=(db, login, nova, min(novos, nova), div))
 
 
 def _estudo_livre(db, login, com_cartoes):
