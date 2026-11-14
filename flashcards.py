@@ -13,7 +13,7 @@ import html
 import io
 import random
 import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import altair as alt
 import pandas as pd
@@ -277,6 +277,7 @@ def registrar_revisao(db, login, cartao_id, nota):
     })
     db.fc_revisoes.insert_one({"usuario_login": login, "cartao_id": c["_id"], "baralho_id": c.get("baralho_id"),
                                "assunto": c.get("assunto") or "", "nota": nota, "caixa_antes": antes,
+                               "novo": not (c.get("revisoes") or 0),
                                "dia": _hoje_str(), "em": _agora()})
     return proxima
 
@@ -464,8 +465,9 @@ def render_page(db, login):
     c1.metric("Disciplinas", len({b["disciplina"] for b in baralhos if b["disciplina"]}))
     c2.metric("Baralhos", len(baralhos))
     c3.metric("Cartões", sum(b["total"] for b in baralhos))
-    c4.metric("Revisões para hoje", sum(b["hoje"] for b in baralhos),
-              help="Cartões já estudados cuja revisão venceu. Cartões novos não entram aqui.")
+    cfg, prog = config_usuario(db, login), progresso_hoje(db, login)
+    c4.metric("Meta de hoje", f"{prog['feitos']} / {cfg['meta']}",
+              help=f"Cartões respondidos hoje sobre a meta diária. Revisões acumuladas: {sum(b['hoje'] for b in baralhos)}.")
     c5.metric("Novos", sum(b["novos"] for b in baralhos), help="Cartões que você ainda não estudou nenhuma vez.")
 
     t_desemp, t_estudar, t_rev, t_baralhos, t_importar = st.tabs(
@@ -475,7 +477,7 @@ def render_page(db, login):
     with t_desemp:
         _aba_desempenho(db, login, baralhos)
     with t_estudar:
-        _aba_estudar(db, login, baralhos)
+        _aba_estudar(db, login, baralhos, cfg, prog)
     with t_baralhos:
         _aba_baralhos(db, login, baralhos)
     with t_importar:
@@ -483,7 +485,7 @@ def render_page(db, login):
 
 
 # ---- Estudar ----
-MODOS = {"dia": "Revisão do dia + novos", "novos": "Só cartões novos", "livre": "Treino livre (todos)",
+MODOS = {"dia": "Todas as revisões vencidas + novos", "novos": "Só cartões novos", "livre": "Treino livre (todos)",
          "ruins": "Só os que errei ou não sabia"}
 
 
@@ -509,7 +511,197 @@ def _iniciar_sessao(ids, inverter=False):
                             fc_inverter=inverter, fc_placar={k: 0 for k in NOTAS}, fc_por_assunto={})
 
 
-def _aba_estudar(db, login, baralhos):
+# ---- Sessão do dia: meta fixa, equilibrada entre as disciplinas ----
+META_PADRAO = {"meta": 40, "novos": 5}
+
+
+def config_usuario(db, login):
+    d = db.fc_config.find_one({"usuario_login": login}) or {}
+    meta = int(d.get("meta") or META_PADRAO["meta"])
+    return {"meta": meta, "novos": min(meta, int(d.get("novos", META_PADRAO["novos"])))}
+
+
+def salvar_config(db, login, meta, novos):
+    db.fc_config.update_one({"usuario_login": login}, {"$set": {"meta": int(meta), "novos": int(novos)}}, upsert=True)
+    st.session_state["_fc_msg"] = f"Meta diária salva: {int(meta)} cartões por dia, até {int(novos)} novos."
+
+
+def progresso_hoje(db, login):
+    """Cartões diferentes já respondidos hoje: {'feitos': n, 'novos': n}."""
+    feitos, novos = set(), set()
+    for r in db.fc_revisoes.find({"usuario_login": login, "dia": _hoje_str()}, {"cartao_id": 1, "novo": 1}):
+        feitos.add(r.get("cartao_id"))
+        if r.get("novo"):
+            novos.add(r.get("cartao_id"))
+    return {"feitos": len(feitos), "novos": len(novos)}
+
+
+def repartir(contagens, n):
+    """Divide n vagas em partes iguais entre os grupos; quem tem menos cartões que a sua parte
+    cede a sobra aos demais. Ex.: 30 vagas, grupos com 200/30/5 cartões -> 13/12/5."""
+    alloc, resto = {g: 0 for g in contagens}, max(0, int(n))
+    while resto > 0:
+        abertos = sorted((g for g in contagens if alloc[g] < contagens[g]),
+                         key=lambda g: (-(contagens[g] - alloc[g]), str(g)))
+        if not abertos:
+            break
+        parte = max(1, resto // len(abertos))
+        for g in abertos:
+            t = min(parte, contagens[g] - alloc[g], resto)
+            alloc[g] += t
+            resto -= t
+            if not resto:
+                break
+    return alloc
+
+
+def _urgencia(c, hoje):
+    """Atraso em relação ao intervalo da caixa: 1 dia de atraso numa caixa de 1 dia é mais
+    urgente do que 1 dia de atraso numa caixa de 30."""
+    try:
+        atraso = (hoje - date.fromisoformat((c.get("proxima_revisao") or "")[:10])).days
+    except ValueError:
+        atraso = 0
+    return (atraso + 1) / INTERVALOS.get(int(c.get("caixa") or 1), 1)
+
+
+def _intercalar(grupos):
+    """Alterna um cartão de cada disciplina (prática intercalada), em vez de blocos."""
+    filas = [list(g) for g in grupos if g]
+    out = []
+    while filas:
+        for f in filas:
+            out.append(f.pop(0))
+        filas = [f for f in filas if f]
+    return out
+
+
+def sessao_do_dia(cartoes, disc_de, meta, novos_dia, feitos=0, novos_feitos=0, hoje=None):
+    """Fila do dia com tamanho fixo.
+    - vagas = meta - cartões já feitos hoje;
+    - até `novos_dia` vagas vão para cartões novos, o resto para revisões vencidas;
+    - as vagas são repartidas igualmente entre as disciplinas (repartir);
+    - dentro da disciplina entram primeiro as revisões mais urgentes (_urgencia);
+    - a fila sai intercalada entre as disciplinas.
+    Retorna (fila, resumo por disciplina, info)."""
+    hoje = hoje or _hoje()
+    hs = hoje.isoformat()
+    grupos = {}
+    for c in cartoes:
+        g = grupos.setdefault(disc_de.get(str(c.get("baralho_id")), SEM_DISCIPLINA), {"venc": [], "novos": []})
+        if _e_novo(c):
+            g["novos"].append(c)
+        elif (c.get("proxima_revisao") or hs) <= hs:
+            g["venc"].append(c)
+    for g in grupos.values():
+        g["venc"].sort(key=lambda c: -_urgencia(c, hoje))
+        g["novos"].sort(key=lambda c: str(c.get("criado_em") or ""))
+    vagas = max(0, int(meta) - int(feitos))
+    tot_venc = sum(len(g["venc"]) for g in grupos.values())
+    tot_novos = sum(len(g["novos"]) for g in grupos.values())
+    q_novos = min(max(0, int(novos_dia) - int(novos_feitos)), tot_novos, vagas)
+    q_rev = min(tot_venc, vagas - q_novos)
+    a_rev = repartir({d: len(g["venc"]) for d, g in grupos.items()}, q_rev)
+    a_nov = repartir({d: len(g["novos"]) for d, g in grupos.items()}, q_novos)
+    ordem = sorted(grupos, key=lambda d: (-a_rev[d] - a_nov[d], d))
+    fila = _intercalar([grupos[d]["venc"][:a_rev[d]] + grupos[d]["novos"][:a_nov[d]] for d in ordem])
+    resumo = [{"Disciplina": d, "Revisões hoje": a_rev[d], "Novos hoje": a_nov[d],
+               "Revisões acumuladas": len(grupos[d]["venc"]), "Novos disponíveis": len(grupos[d]["novos"])}
+              for d in ordem if grupos[d]["venc"] or grupos[d]["novos"]]
+    info = {"vagas": vagas, "revisoes": q_rev, "novos": q_novos, "acumuladas": tot_venc, "novos_total": tot_novos}
+    return fila, resumo, info
+
+
+def _painel_do_dia(db, login, baralhos, cfg, prog):
+    disc_de = {b["id"]: _rotulo_disc(b["disciplina"]) for b in baralhos}
+    cartoes = list(db.fc_cartoes.find({"usuario_login": login},
+                                      {"baralho_id": 1, "caixa": 1, "proxima_revisao": 1, "revisoes": 1, "criado_em": 1}))
+    extra = int(st.session_state.get("fc_extra_dia") or 0) if st.session_state.get("fc_extra_data") == _hoje_str() else 0
+    meta = cfg["meta"] + extra
+    fila, resumo, info = sessao_do_dia(cartoes, disc_de, meta, cfg["novos"], prog["feitos"], prog["novos"])
+
+    st.markdown("#### 📅 Sessão do dia")
+    k = st.columns(4)
+    k[0].metric("Meta de hoje", f"{prog['feitos']} / {meta}", help="Cartões diferentes respondidos hoje sobre a meta diária.")
+    k[1].metric("Na sessão", len(fila), f"{info['revisoes']} revisões + {info['novos']} novos", delta_color="off")
+    k[2].metric("Revisões acumuladas", info["acumuladas"],
+                help="Revisões vencidas no total. Só uma parte entra por dia; o resto espera, das mais urgentes "
+                     "para as menos urgentes.")
+    cap = max(1, cfg["meta"] - cfg["novos"])
+    dias = -(-max(0, info["acumuladas"] - info["revisoes"]) // cap)
+    k[3].metric("Para zerar o acúmulo", "em dia" if not dias else f"≈ {dias} dia(s)",
+                help="Estimativa no ritmo atual, sem contar as revisões que ainda vão vencer.")
+    st.progress(min(1.0, prog["feitos"] / meta) if meta else 0.0)
+
+    if fila:
+        st.dataframe(resumo, width="stretch", hide_index=True)
+        if st.button(f"▶ Começar a sessão do dia ({len(fila)} cartões)", type="primary", key="fc_dia_ir"):
+            _iniciar_sessao([str(c["_id"]) for c in fila])
+            st.rerun()
+        st.caption("As vagas do dia são divididas igualmente entre as disciplinas, e os cartões saem alternados. "
+                   "Errar um cartão o traz de volta na mesma sessão, sem gastar outra vaga.")
+    elif not info["vagas"]:
+        st.success(f"🎯 Meta do dia cumprida: {prog['feitos']} cartões. O que sobrou fica para amanhã.")
+        if (info["acumuladas"] or info["novos_total"]) and st.button("➕ Estudar mais 10 hoje", key="fc_dia_mais"):
+            st.session_state.update(fc_extra_dia=extra + 10, fc_extra_data=_hoje_str())
+            st.rerun()
+    else:
+        st.success("🎉 Nenhuma revisão vencida e nenhum cartão novo na cota de hoje.")
+    if info["acumuladas"] > 5 * cfg["meta"] and cfg["novos"]:
+        st.info(f"Há {info['acumuladas']} revisões acumuladas. Para reduzir mais rápido, zere os **novos por dia** "
+                "por um tempo: todas as vagas vão para revisão.")
+
+    with st.expander("⚙️ Ajustar a meta diária"):
+        m1, m2 = st.columns(2)
+        nova = m1.number_input("Cartões por dia", 5, 300, cfg["meta"], step=5, key="fc_cfg_meta")
+        novos = m2.number_input("Dos quais, novos (no máximo)", 0, 300, cfg["novos"], step=1, key="fc_cfg_novos")
+        st.button("Salvar meta", key="fc_cfg_salvar", on_click=salvar_config, args=(db, login, nova, min(novos, nova)))
+
+
+def _estudo_livre(db, login, com_cartoes):
+    discs = list(dict.fromkeys(b["disciplina"] for b in com_cartoes))
+    sel_disc = st.multiselect("Disciplinas", discs, default=discs, format_func=_rotulo_disc)
+    candidatos = [b for b in com_cartoes if b["disciplina"] in sel_disc]
+    n_fav = db.fc_cartoes.count_documents({"usuario_login": login, "favorito": True})
+    nomes = {FAV: f"⭐ Favoritos ({n_fav})"} if n_fav else {}
+    nomes.update({b["id"]: f"{b['nome']} ({b['hoje']} revisões · {b['novos']} novos / {b['total']})" for b in candidatos})
+    sel = st.multiselect("Baralhos", list(nomes), default=[i for i in nomes if i != FAV], format_func=nomes.get,
+                         help="⭐ Favoritos é um baralho fixo com os cartões que você marcou, de qualquer "
+                              "disciplina. Marque com a estrela durante o estudo ou na tabela de cartões.")
+
+    assuntos = sorted({a for b in candidatos if b["id"] in sel for a in b["assuntos"]},
+                      key=lambda a: (a == "", a.lower()))
+    sel_ass = st.multiselect("Assuntos (vazio = todos)", assuntos, format_func=_rotulo_assunto)
+
+    modo = st.radio("Modo", list(MODOS), format_func=MODOS.get, horizontal=True, key="fc_modo3", index=2,
+                    help="Em todos os modos as respostas atualizam o agendamento.")
+    o1, o2, o3, o4 = st.columns(4)
+    embaralhar = o1.checkbox("Embaralhar", value=True, key="fc_emb")
+    inverter = o2.checkbox("Verso primeiro", key="fc_inv", help="Mostra a resposta e você lembra a pergunta.")
+    max_novos = o3.number_input("Novos por sessão", 0, 500, 10, step=5, key="fc_novos",
+                                help="Quantos cartões nunca estudados entram na sessão. Vale para "
+                                     "'Revisão do dia + novos' e 'Só cartões novos'. Mantém a carga diária sob controle.")
+    limite = o4.number_input("Máx. de cartões (0 = todos)", 0, 1000, 0, step=10, key="fc_lim")
+    if st.button("▶ Começar", type="primary", disabled=not sel):
+        cartoes = listar_cartoes(db, login, sel, sel_ass or None)
+        if modo in ("dia", "novos"):
+            venc, novos = fila_do_dia(cartoes, _hoje_str(), max_novos, embaralhar)
+            cartoes = (venc if modo == "dia" else []) + novos  # revisões primeiro, novos depois
+        else:
+            if modo == "ruins":
+                cartoes = [c for c in cartoes if c.get("ultima_nota") in RUIM]
+            if embaralhar:
+                random.shuffle(cartoes)
+        if limite:
+            cartoes = cartoes[:limite]
+        if not cartoes:
+            st.success("🎉 Nenhum cartão com esses filtros neste modo.")
+            return
+        _iniciar_sessao([str(c["_id"]) for c in cartoes], inverter)
+        st.rerun()
+
+
+def _aba_estudar(db, login, baralhos, cfg=None, prog=None):
     com_cartoes = [b for b in baralhos if b["total"]]
     if not com_cartoes:
         st.info("Nenhum cartão ainda. Crie um baralho em **Baralhos e cartões** ou use **Importar**.")
@@ -517,46 +709,9 @@ def _aba_estudar(db, login, baralhos):
 
     fila = st.session_state.get("fc_fila")
     if fila is None:
-        discs = list(dict.fromkeys(b["disciplina"] for b in com_cartoes))
-        sel_disc = st.multiselect("Disciplinas", discs, default=discs, format_func=_rotulo_disc)
-        candidatos = [b for b in com_cartoes if b["disciplina"] in sel_disc]
-        n_fav = db.fc_cartoes.count_documents({"usuario_login": login, "favorito": True})
-        nomes = {FAV: f"⭐ Favoritos ({n_fav})"} if n_fav else {}
-        nomes.update({b["id"]: f"{b['nome']} ({b['hoje']} revisões · {b['novos']} novos / {b['total']})" for b in candidatos})
-        sel = st.multiselect("Baralhos", list(nomes), default=[i for i in nomes if i != FAV], format_func=nomes.get,
-                             help="⭐ Favoritos é um baralho fixo com os cartões que você marcou, de qualquer "
-                                  "disciplina. Marque com a estrela durante o estudo ou na tabela de cartões.")
-
-        assuntos = sorted({a for b in candidatos if b["id"] in sel for a in b["assuntos"]},
-                          key=lambda a: (a == "", a.lower()))
-        sel_ass = st.multiselect("Assuntos (vazio = todos)", assuntos, format_func=_rotulo_assunto)
-
-        modo = st.radio("Modo", list(MODOS), format_func=MODOS.get, horizontal=True, key="fc_modo2",
-                        help="Em todos os modos as respostas atualizam o agendamento.")
-        o1, o2, o3, o4 = st.columns(4)
-        embaralhar = o1.checkbox("Embaralhar", value=True, key="fc_emb")
-        inverter = o2.checkbox("Verso primeiro", key="fc_inv", help="Mostra a resposta e você lembra a pergunta.")
-        max_novos = o3.number_input("Novos por sessão", 0, 500, 10, step=5, key="fc_novos",
-                                    help="Quantos cartões nunca estudados entram na sessão. Vale para "
-                                         "'Revisão do dia + novos' e 'Só cartões novos'. Mantém a carga diária sob controle.")
-        limite = o4.number_input("Máx. de cartões (0 = todos)", 0, 1000, 0, step=10, key="fc_lim")
-        if st.button("▶ Começar", type="primary", disabled=not sel):
-            cartoes = listar_cartoes(db, login, sel, sel_ass or None)
-            if modo in ("dia", "novos"):
-                venc, novos = fila_do_dia(cartoes, _hoje_str(), max_novos, embaralhar)
-                cartoes = (venc if modo == "dia" else []) + novos  # revisões primeiro, novos depois
-            else:
-                if modo == "ruins":
-                    cartoes = [c for c in cartoes if c.get("ultima_nota") in RUIM]
-                if embaralhar:
-                    random.shuffle(cartoes)
-            if limite:
-                cartoes = cartoes[:limite]
-            if not cartoes:
-                st.success("🎉 Nenhum cartão com esses filtros neste modo.")
-                return
-            _iniciar_sessao([str(c["_id"]) for c in cartoes], inverter)
-            st.rerun()
+        _painel_do_dia(db, login, baralhos, cfg or config_usuario(db, login), prog or progresso_hoje(db, login))
+        with st.expander("🎛️ Estudo livre: escolher baralhos, assuntos e modo"):
+            _estudo_livre(db, login, com_cartoes)
         return
 
     pos = st.session_state.get("fc_pos", 0)
@@ -689,7 +844,7 @@ def _aba_baralhos(db, login, baralhos):
         "Disciplina": _rotulo_disc(b["disciplina"]), "Baralho": b["nome"],
         "Assuntos": len([a for a in b["assuntos"] if a]),
         "Lista de assuntos": ", ".join(_rotulo_assunto(a) for a in b["assuntos"]),
-        "Cartões": b["total"], "Revisões para hoje": b["hoje"], "Novos": b["novos"],
+        "Cartões": b["total"], "Revisões vencidas": b["hoje"], "Novos": b["novos"],
     } for b in baralhos], width="stretch", hide_index=True)
 
     por_id = {b["id"]: b for b in baralhos}
