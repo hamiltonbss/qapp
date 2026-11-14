@@ -257,9 +257,10 @@ def adicionar_cartoes(db, login, baralho_id, cartoes):
     return len(docs), repetidos
 
 
-def registrar_revisao(db, login, cartao_id, nota):
+def registrar_revisao(db, login, cartao_id, nota, origem="livre"):
     """nota: 'naosei' | 'errei' | 'acertei' | 'facil' — sistema de Leitner.
-    Cada resposta também fica em `fc_revisoes`, base do termômetro de desempenho."""
+    Cada resposta também fica em `fc_revisoes`, base do termômetro de desempenho.
+    origem: 'dia' (sessão do dia, conta na meta) ou 'livre' (estudo livre e treinos, não conta)."""
     c = db.fc_cartoes.find_one({"_id": _oid(cartao_id), "usuario_login": login})
     if not c:
         return None
@@ -277,7 +278,7 @@ def registrar_revisao(db, login, cartao_id, nota):
     })
     db.fc_revisoes.insert_one({"usuario_login": login, "cartao_id": c["_id"], "baralho_id": c.get("baralho_id"),
                                "assunto": c.get("assunto") or "", "nota": nota, "caixa_antes": antes,
-                               "novo": not (c.get("revisoes") or 0),
+                               "novo": not (c.get("revisoes") or 0), "origem": origem,
                                "dia": _hoje_str(), "em": _agora()})
     return proxima
 
@@ -467,7 +468,7 @@ def render_page(db, login):
     c3.metric("Cartões", sum(b["total"] for b in baralhos))
     cfg, prog = config_usuario(db, login), progresso_hoje(db, login)
     c4.metric("Meta de hoje", f"{prog['feitos']} / {cfg['meta']}",
-              help=f"Cartões respondidos hoje sobre a meta diária. Revisões acumuladas: {sum(b['hoje'] for b in baralhos)}.")
+              help=f"Cartões respondidos hoje na sessão do dia (o estudo livre não conta). Revisões acumuladas: {sum(b['hoje'] for b in baralhos)}.")
     c5.metric("Novos", sum(b["novos"] for b in baralhos), help="Cartões que você ainda não estudou nenhuma vez.")
 
     t_desemp, t_estudar, t_rev, t_baralhos, t_importar = st.tabs(
@@ -506,8 +507,8 @@ def fila_do_dia(cartoes, hoje, max_novos, embaralhar=True):
     return venc, novos[:max(0, int(max_novos))]
 
 
-def _iniciar_sessao(ids, inverter=False):
-    st.session_state.update(fc_fila=list(ids), fc_pos=0, fc_virado=False, fc_registrado=False,
+def _iniciar_sessao(ids, inverter=False, origem="livre"):
+    st.session_state.update(fc_fila=list(ids), fc_pos=0, fc_virado=False, fc_registrado=False, fc_origem=origem,
                             fc_inverter=inverter, fc_placar={k: 0 for k in NOTAS}, fc_por_assunto={})
 
 
@@ -531,9 +532,11 @@ def salvar_config(db, login, meta, novos, divisao="inteligente"):
 
 
 def progresso_hoje(db, login):
-    """Cartões diferentes já respondidos hoje: {'feitos': n, 'novos': n}."""
+    """Cartões diferentes respondidos hoje NA SESSÃO DO DIA: {'feitos': n, 'novos': n}.
+    Respostas do estudo livre e dos treinos do painel não contam para a meta."""
     feitos, novos = set(), set()
-    for r in db.fc_revisoes.find({"usuario_login": login, "dia": _hoje_str()}, {"cartao_id": 1, "novo": 1}):
+    for r in db.fc_revisoes.find({"usuario_login": login, "dia": _hoje_str(), "origem": "dia"},
+                                 {"cartao_id": 1, "novo": 1}):
         feitos.add(r.get("cartao_id"))
         if r.get("novo"):
             novos.add(r.get("cartao_id"))
@@ -663,7 +666,8 @@ def _painel_do_dia(db, login, baralhos, cfg, prog):
 
     st.markdown("#### 📅 Sessão do dia")
     k = st.columns(4)
-    k[0].metric("Meta de hoje", f"{prog['feitos']} / {meta}", help="Cartões diferentes respondidos hoje sobre a meta diária.")
+    k[0].metric("Meta de hoje", f"{prog['feitos']} / {meta}", help="Cartões respondidos hoje na sessão do dia. O estudo livre e os treinos "
+                                                 "do painel não entram na conta.")
     k[1].metric("Na sessão", len(fila), f"{info['revisoes']} revisões + {info['novos']} novos", delta_color="off")
     k[2].metric("Revisões acumuladas", info["acumuladas"],
                 help="Revisões vencidas no total. Só uma parte entra por dia; o resto espera, das mais urgentes "
@@ -677,7 +681,7 @@ def _painel_do_dia(db, login, baralhos, cfg, prog):
     if fila:
         st.dataframe(resumo, width="stretch", hide_index=True)
         if st.button(f"▶ Começar a sessão do dia ({len(fila)} cartões)", type="primary", key="fc_dia_ir"):
-            _iniciar_sessao([str(c["_id"]) for c in fila])
+            _iniciar_sessao([str(c["_id"]) for c in fila], origem="dia")
             st.rerun()
         st.caption(("Divisão inteligente: cada disciplina recebe vagas na proporção do **peso** (de 1 a 3), que sobe "
                     "com a prioridade de reforço do termômetro. Toda disciplina com revisão vencida recebe pelo "
@@ -846,7 +850,7 @@ def _avancar():
 
 
 def _responder(db, login, cartao_id, nota, assunto="", avancar=True):
-    registrar_revisao(db, login, cartao_id, nota)
+    registrar_revisao(db, login, cartao_id, nota, st.session_state.get("fc_origem", "livre"))
     fila = st.session_state["fc_fila"]
     if nota in RUIM and fila.count(cartao_id) < 3:
         fila.append(cartao_id)  # volta no fim da sessão (no máximo 3 vezes)
@@ -863,7 +867,8 @@ def _responder(db, login, cartao_id, nota, assunto="", avancar=True):
 
 
 def _encerrar_sessao():
-    for k in ("fc_fila", "fc_pos", "fc_virado", "fc_registrado", "fc_inverter", "fc_placar", "fc_por_assunto"):
+    for k in ("fc_fila", "fc_pos", "fc_virado", "fc_registrado", "fc_inverter", "fc_placar", "fc_por_assunto",
+              "fc_origem"):
         st.session_state.pop(k, None)
 
 
