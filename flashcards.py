@@ -283,6 +283,49 @@ def registrar_revisao(db, login, cartao_id, nota, origem="livre"):
     return proxima
 
 
+def editar_cartao(db, login, cartao_id, frente, verso, assunto=""):
+    """Altera o texto do cartão sem mexer no agendamento nem no histórico.
+    Retorna None se deu certo ou a mensagem de erro."""
+    frente, verso, assunto = (frente or "").strip(), (verso or "").strip(), (assunto or "").strip()
+    if not frente or not verso:
+        return "Frente e verso não podem ficar vazios."
+    c = db.fc_cartoes.find_one({"_id": _oid(cartao_id), "usuario_login": login}, {"baralho_id": 1})
+    if not c:
+        return "Cartão não encontrado."
+    if db.fc_cartoes.find_one({"usuario_login": login, "baralho_id": c.get("baralho_id"), "frente": frente,
+                               "_id": {"$ne": c["_id"]}}, {"_id": 1}):
+        return "Já existe outro cartão com essa frente neste baralho."
+    db.fc_cartoes.update_one({"_id": c["_id"], "usuario_login": login},
+                             {"$set": {"frente": frente, "verso": verso, "assunto": assunto, "editado_em": _agora()}})
+    return None
+
+
+def _editor_em_estudo(db, login, cartao, bar):
+    """Formulário de edição do cartão aberto na sessão de estudo."""
+    cid = str(cartao["_id"])
+    with st.form(f"fc_ed_{cid}", border=False):
+        frente = st.text_area("Frente (pergunta)", cartao.get("frente", ""), height=110)
+        verso = st.text_area("Verso (resposta)", cartao.get("verso", ""), height=150)
+        atual = cartao.get("assunto") or ""
+        opcoes = list(dict.fromkeys([atual] + [a for a in bar.get("assuntos") or [] if a] + [""]))
+        assunto = st.selectbox("Assunto", opcoes, accept_new_options=True, format_func=lambda x: x or "— sem assunto —",
+                               help="Escolha um assunto do baralho ou digite um novo.")
+        if st.form_submit_button("💾 Salvar alterações", type="primary"):
+            erro = editar_cartao(db, login, cid, frente, verso, assunto or "")
+            if erro:
+                st.error(erro)
+            else:
+                st.toast("Cartão atualizado.")
+                st.rerun()
+    st.caption("A edição não altera a caixa, a próxima revisão nem o histórico do cartão.")
+    if st.checkbox("Quero excluir este cartão", key=f"fc_ed_delok_{cid}"):
+        if st.button("🗑️ Excluir cartão", key=f"fc_ed_del_{cid}"):
+            db.fc_cartoes.delete_one({"_id": cartao["_id"], "usuario_login": login})
+            st.toast("Cartão excluído.")
+            _avancar()
+            st.rerun()
+
+
 def favoritar(db, login, cartao_id, valor=True):
     db.fc_cartoes.update_one({"_id": _oid(cartao_id), "usuario_login": login}, {"$set": {"favorito": bool(valor)}})
 
@@ -784,13 +827,15 @@ def _aba_estudar(db, login, baralhos, cfg=None, prog=None):
     fav = bool(cartao.get("favorito"))
 
     st.progress(pos / len(fila), text=f"Cartão {pos + 1} de {len(fila)}")
-    t1, t2 = st.columns([6, 1])
+    t1, t3, t2 = st.columns([5, 1, 1])
     t1.markdown(
         f"<span class='fc2-tag'>{_esc(_rotulo_disc(bar.get('disciplina')))}</span>"
         f"<span class='fc2-tag assunto'>{_esc(_rotulo_assunto(assunto))}</span>"
         f"<span class='fc2-meta'>{_esc(bar.get('nome', ''))} · "
         + ("cartão novo" if _e_novo(cartao) else
            f"caixa {cartao.get('caixa', 1)} de {MAX_CAIXA} · revisado {cartao.get('revisoes', 0)}x") + "</span>", unsafe_allow_html=True)
+    with t3.popover("✏️", help="Editar este cartão"):
+        _editor_em_estudo(db, login, cartao, bar)
     t2.button("⭐" if fav else "☆", key=f"fc_fav_{cid}_{pos}", width="stretch",
               help="Tirar dos favoritos" if fav else "Guardar no baralho ⭐ Favoritos",
               on_click=favoritar, args=(db, login, cid, not fav))
