@@ -1,8 +1,10 @@
 """Módulo de Análise Morfossintática — treino com termo destacado.
 
 Cada exercício é uma oração com um ou mais trechos destacados. Para cada destaque o aluno
-escolhe, num dropdown, a classificação da camada correspondente (morfologia, sintaxe,
-orações ou pontuação) e recebe a correção ao terminar a oração.
+escolhe, num dropdown, a classificação da camada correspondente (morfologia, sintaxe, orações,
+pontuação, verbos, emprego de que/se/como…, porquês, crase, acentuação, hífen, colocação,
+concordância e regência) e recebe a correção ao terminar a oração. Na camada "forma" o trecho
+vira uma lacuna e o aluno escolhe a forma correta entre as opções do item.
 
 Coleções: `sx_exercicios` (compartilhados, como os questionários), `sx_respostas` (por usuário)
 e `sx_rotulos` (classificações extras aceitas na importação).
@@ -42,9 +44,26 @@ CAMADAS = {
     "verbo_tempo": "Modo e tempo da forma verbal destacada",
     "verbo_voz": "Voz da forma verbal destacada",
     "verbo_valor": "Valor (emprego) da forma verbal destacada",
+    "palavra": "Emprego da palavra destacada (que, se, como…)",
+    "forma": "Forma correta para a lacuna",
+    "porques": "Uso do porquê",
+    "crase": "Justificativa do uso (ou não) da crase",
+    "acentuacao": "Regra do acento (ou da ausência dele)",
+    "hifen": "Regra do hífen",
+    "colocacao": "Justificativa da colocação pronominal",
+    "concordancia": "Regra de concordância",
+    "regencia": "Regência do verbo ou do nome",
 }
 NOMES_CAMADA = {"morfologia": "Morfologia", "sintaxe": "Sintaxe", "oracoes": "Orações", "pontuacao": "Pontuação",
-                "verbo_tempo": "Verbo: modo e tempo", "verbo_voz": "Verbo: voz", "verbo_valor": "Verbo: valor"}
+                "verbo_tempo": "Verbo: modo e tempo", "verbo_voz": "Verbo: voz", "verbo_valor": "Verbo: valor",
+                "palavra": "Emprego de que, se, como…", "forma": "Forma correta (lacuna)", "porques": "Porquês",
+                "crase": "Crase", "acentuacao": "Acentuação", "hifen": "Hífen", "colocacao": "Colocação pronominal",
+                "concordancia": "Concordância", "regencia": "Regência"}
+# Palavras da camada "palavra" e suas variações (o dropdown mostra só as classificações da palavra destacada)
+VARIANTES_PALAVRA = {"quê": "que", "aonde": "onde", "cuja": "cujo", "cujos": "cujo", "cujas": "cujo",
+                     "mesma": "mesmo", "mesmos": "mesmo", "mesmas": "mesmo", "meia": "meio/bastante",
+                     "meio": "meio/bastante", "meios": "meio/bastante", "meias": "meio/bastante",
+                     "bastante": "meio/bastante", "bastantes": "meio/bastante"}
 
 ROTULOS = {
     "morfologia": [
@@ -113,11 +132,127 @@ ROTULOS = {
         "Subjuntivo: desejo", "Imperativo: ordem", "Imperativo: pedido ou conselho",
         "Gerúndio: ação em curso", "Infinitivo com valor de imperativo",
     ],
+    "palavra": [
+        "Que: pronome relativo", "Que: conjunção integrante", "Que: conjunção consecutiva",
+        "Que: conjunção comparativa", "Que: conjunção causal ou explicativa", "Que: advérbio de intensidade",
+        "Que: pronome interrogativo ou exclamativo", "Que: substantivo (quê)", "Que: preposição (ter que)",
+        "Que: partícula expletiva ou de realce", "Que: interjeição (quê!)",
+        "Se: partícula apassivadora", "Se: índice de indeterminação do sujeito", "Se: pronome reflexivo",
+        "Se: pronome reflexivo recíproco", "Se: parte integrante do verbo", "Se: partícula de realce (expletiva)",
+        "Se: conjunção condicional", "Se: conjunção integrante",
+        "Como: conjunção comparativa", "Como: conjunção conformativa", "Como: conjunção causal",
+        "Como: advérbio interrogativo de modo", "Como: advérbio de intensidade (exclamativo)",
+        "Como: preposição acidental (na qualidade de)",
+        "Onde: pronome relativo (lugar)", "Onde: advérbio interrogativo de lugar",
+        "Onde: uso inadequado (não indica lugar; use em que)",
+        "Cujo: pronome relativo de posse", "Cujo: uso inadequado (artigo depois ou sem ideia de posse)",
+        "Mesmo: adjetivo ou pronome (variável)", "Mesmo: advérbio (= até, realmente)",
+        "Mesmo: conjunção concessiva (mesmo que)", "Mesmo: uso inadequado para retomar termo (o mesmo)",
+        "A: artigo definido", "A: preposição", "A: pronome oblíquo (= ela)", "A: pronome demonstrativo (= aquela)",
+        "Meio/bastante: numeral ou adjetivo (variável)", "Meio/bastante: pronome indefinido (variável)",
+        "Meio/bastante: advérbio (invariável)",
+    ],
+    "porques": [
+        "Por que: pergunta (por qual motivo)", "Por que: equivale a pelo qual ou pela qual",
+        "Por quê: fim de frase ou antes de pausa", "Porque: causa ou explicação (= pois)",
+        "Porquê: substantivo (vem com determinante)",
+    ],
+    "crase": [
+        "Obrigatória: preposição a + artigo a diante de palavra feminina",
+        "Obrigatória: a + aquele(s), aquela(s), aquilo", "Obrigatória: a + a qual, as quais",
+        "Obrigatória: locução adverbial, prepositiva ou conjuntiva feminina (às vezes, à medida que)",
+        "Obrigatória: indicação de horas", "Obrigatória: à moda de, à maneira de (subentendido)",
+        "Obrigatória: lugar que admite artigo (vou à Bahia)",
+        "Proibida: antes de palavra masculina", "Proibida: antes de verbo",
+        "Proibida: antes de pronome pessoal, de tratamento ou indefinido",
+        "Proibida: a no singular antes de palavra no plural", "Proibida: entre palavras repetidas (cara a cara)",
+        "Proibida: lugar que não admite artigo (vou a Brasília)",
+        "Proibida: palavra feminina em sentido genérico, sem artigo",
+        "Proibida: o termo regente não exige preposição",
+        "Facultativa: antes de pronome possessivo feminino", "Facultativa: antes de nome próprio feminino de pessoa",
+        "Facultativa: depois de até",
+        "Há: verbo haver indicando tempo decorrido", "A: preposição indicando tempo futuro ou distância",
+    ],
+    "acentuacao": [
+        "Oxítona terminada em -a, -e, -o (-s), -em, -ens", "Paroxítona terminada em -l, -n, -r, -x, -ps",
+        "Paroxítona terminada em -ã(s), -ão(s), -i(s), -us, -um, -uns, -om, -ons", "Paroxítona terminada em ditongo",
+        "Proparoxítona (todas são acentuadas)", "Monossílabo tônico terminado em -a, -e, -o (-s)",
+        "Ditongo aberto éi, éu, ói em oxítona ou monossílabo", "Hiato com i ou u tônico (sozinho ou com s na sílaba)",
+        "Acento diferencial (pôr, pôde, têm, vêm e derivados)",
+        "Sem acento: oxítona terminada em -i ou -u", "Sem acento: paroxítona terminada em -a, -e, -o, -em, -ens",
+        "Sem acento: monossílabo átono", "Sem acento: ditongo aberto em paroxítona (ideia, heroico)",
+        "Sem acento: hiato seguido de nh, ou com l, m, n, r, z na sílaba",
+        "Sem acento: i ou u tônico depois de ditongo em paroxítona (feiura)",
+        "Sem acento: vogal dobrada (leem, voo, enjoo)", "Sem acento: diferencial abolido (para, pelo, polo, pera)",
+        "Sem acento: prefixo (semi, super, hiper, anti)", "Sem trema: abolido (salvo nomes estrangeiros)",
+    ],
+    "hifen": [
+        "Com hífen: segundo elemento começa por h", "Sem hífen: des-, in- e co- eliminam o h",
+        "Com hífen: prefixo termina na mesma vogal que inicia o segundo elemento",
+        "Sem hífen: co- e re- diante de vogal igual (cooperar, reeleger)",
+        "Sem hífen: vogal do prefixo diferente da inicial do segundo elemento",
+        "Sem hífen, dobrando r ou s: prefixo em vogal + r ou s",
+        "Com hífen: prefixo termina na mesma consoante que inicia o segundo elemento",
+        "Com hífen: sub- diante de b, h ou r", "Sem hífen: prefixo em consoante + vogal",
+        "Com hífen: ex- (anterior), vice-, recém-, sem-, além-, aquém-", "Com hífen: pré-, pós-, pró- tônicos",
+        "Sem hífen: pre-, pos-, pro- átonos (prever, pospor, promover)",
+        "Com hífen: circum- e pan- antes de vogal, h, m ou n", "Com hífen: bem- (regra geral)",
+        "Sem hífen: bem- aglutinado (benfeitor, benquerer)", "Com hífen: mal- antes de vogal, h ou l",
+        "Sem hífen: mal- antes de consoante (malcriado)",
+        "Sem hífen: composto com elemento de ligação (dia a dia, fim de semana)",
+        "Com hífen: exceção consagrada (cor-de-rosa, água-de-colônia, pé-de-meia)",
+        "Com hífen: espécie de planta ou animal", "Com hífen: composto sem elemento de ligação (guarda-chuva)",
+        "Junto: composição não mais percebida (paraquedas, girassol)",
+    ],
+    "colocacao": [
+        "Próclise: palavra negativa", "Próclise: advérbio sem vírgula", "Próclise: pronome relativo",
+        "Próclise: conjunção subordinativa", "Próclise: pronome indefinido ou demonstrativo",
+        "Próclise: frase exclamativa, interrogativa ou optativa", "Próclise: em + gerúndio",
+        "Ênclise: início de frase", "Ênclise: imperativo afirmativo",
+        "Ênclise: infinitivo impessoal ou gerúndio sem palavra atrativa", "Ênclise: depois de vírgula ou pausa",
+        "Mesóclise: futuro do presente ou do pretérito sem palavra atrativa",
+        "Facultativa: sujeito expresso sem palavra atrativa", "Facultativa: infinitivo precedido de preposição",
+        "Locução verbal: pronome junto ao auxiliar ou ao principal",
+        "Locução com particípio: pronome junto ao auxiliar",
+        "Incorreta: próclise em início de frase", "Incorreta: ênclise com palavra atrativa",
+        "Incorreta: ênclise com verbo no futuro", "Incorreta: pronome depois do particípio",
+    ],
+    "concordancia": [
+        "Verbal: verbo concorda com o núcleo do sujeito", "Verbal: sujeito posposto ao verbo",
+        "Verbal: sujeito composto anteposto (plural)", "Verbal: sujeito composto posposto (plural ou o mais próximo)",
+        "Verbal: haver no sentido de existir (impessoal, singular)",
+        "Verbal: fazer indicando tempo (impessoal, singular)", "Verbal: auxiliar de verbo impessoal fica no singular",
+        "Verbal: passiva sintética (concorda com o sujeito paciente)",
+        "Verbal: índice de indeterminação (verbo no singular)",
+        "Verbal: expressão partitiva (a maioria de: singular ou plural)",
+        "Verbal: pronome relativo que (concorda com o antecedente)",
+        "Verbal: pronome relativo quem (3ª pessoa ou antecedente)", "Verbal: um dos que (plural preferencial)",
+        "Verbal: verbo ser (concorda com o predicativo em casos especiais)",
+        "Verbal: porcentagem (com o numeral ou com o termo especificado)",
+        "Nominal: adjetivo concorda com o substantivo",
+        "Nominal: adjetivo posposto a dois substantivos (plural ou o mais próximo)",
+        "Nominal: adjetivo anteposto (concorda com o mais próximo)",
+        "Nominal: anexo, incluso, obrigado, mesmo, próprio (variáveis)", "Nominal: menos e alerta (invariáveis)",
+        "Nominal: meio e bastante (variam como adjetivo, não como advérbio)",
+        "Nominal: é proibido, é necessário (invariável sem artigo; varia com artigo)",
+    ],
+    "regencia": [
+        "Assistir (ver): transitivo indireto, a", "Assistir (ajudar): transitivo direto",
+        "Aspirar (desejar): transitivo indireto, a", "Visar (pretender): transitivo indireto, a",
+        "Obedecer e desobedecer: transitivo indireto, a",
+        "Preferir: direto e indireto, a (sem mais e sem do que)", "Implicar (acarretar): transitivo direto",
+        "Chegar e ir: com a (e não em)", "Agradar (satisfazer): transitivo indireto, a",
+        "Proceder (realizar): transitivo indireto, a", "Pagar e perdoar: direto (coisa) e indireto (pessoa)",
+        "Esquecer e lembrar: direto, ou pronominal com de", "Informar e avisar: alguém de algo ou algo a alguém",
+        "Simpatizar: transitivo indireto, com (não é pronominal)", "Namorar: transitivo direto",
+        "Querer (estimar): transitivo indireto, a", "Regência nominal: o nome exige preposição",
+        "Pronome relativo precedido da preposição exigida",
+    ],
 }
-COLUNAS = ["grupo", "oracao", "camada", "resposta", "aceitas", "explicacao"]
+COLUNAS = ["grupo", "oracao", "camada", "resposta", "aceitas", "explicacao", "opcoes"]
 _MARCA = re.compile(r"\{\{(.+?)\}\}", re.S)
 
-MODELO_IMPORTACAO = """grupo;oracao;camada;resposta;aceitas;explicacao
+MODELO_IMPORTACAO = """grupo;oracao;camada;resposta;aceitas;explicacao;opcoes
 Termos acessórios;O menino {{de boné}} chegou cedo.;sintaxe;Adjunto adnominal;;Caracteriza o substantivo concreto "menino".
 Termos acessórios;O menino de boné chegou {{cedo}}.;sintaxe;Adjunto adverbial de tempo;;Indica circunstância de tempo do verbo.
 Termos acessórios;O livro {{que}} li era ótimo.;morfologia;Pronome relativo;;Retoma "livro" e inicia oração adjetiva.
@@ -126,7 +261,16 @@ Vírgula;No fim da tarde{{,}} os alunos saíram.;pontuacao;Isola adjunto adverbi
 Vírgula;Os alunos da turma B{{,}} saíram cedo.;pontuacao;Incorreta: separa sujeito e verbo;;Não se separa o sujeito do verbo por vírgula.
 Verbos;Segundo a polícia, o suspeito {{teria fugido}} pela janela.;tempo;Futuro do pretérito composto;;Locução com o auxiliar "ter" no futuro do pretérito.
 Verbos;Segundo a polícia, o suspeito {{teria fugido}} pela janela.;valor;Futuro do pretérito: incerteza ou fato não confirmado;;O jornalista não assume o fato como certo.
-Verbos;{{Vendem-se}} casas.;voz;Voz passiva sintética;;"Se" apassivador com verbo transitivo direto: casas são vendidas."""
+Verbos;{{Vendem-se}} casas.;voz;Voz passiva sintética;;"Se" apassivador com verbo transitivo direto: casas são vendidas.
+Emprego do se;Precisa-{{se}} de novos ajudantes.;palavra;Se: índice de indeterminação do sujeito;;Verbo transitivo indireto no singular.
+Porquês;Adiaram a sessão {{porque}} faltou quórum.;forma;porque;;Indica a causa, equivale a pois.;por que|por quê|porque|porquê
+Porquês;Adiaram a sessão {{porque}} faltou quórum.;porques;Porque: causa ou explicação (= pois);;Introduz a causa do adiamento.;
+Crase;A audiência começou {{às}} dez horas.;forma;às;;Indicação de horas.;as|às|há
+Crase;A audiência começou {{às}} dez horas.;crase;Obrigatória: indicação de horas;;Diante de horas determinadas a crase é obrigatória.;
+Hífen;O discurso {{antirreligioso}} gerou polêmica.;forma;antirreligioso;;Prefixo em vogal + r: junta e dobra o r.;antirreligioso|anti-religioso|anti religioso
+Hífen;O discurso {{antirreligioso}} gerou polêmica.;hifen;Sem hífen, dobrando r ou s: prefixo em vogal + r ou s;;Anti termina em vogal e religioso começa por r.;
+Acentuação;Os {{heróis}} chegaram cedo.;acentuacao;Ditongo aberto éi, éu, ói em oxítona ou monossílabo;;Heróis é oxítona com ditongo aberto ói.;
+Colocação;Ninguém {{me}} avisou da reunião.;colocacao;Próclise: palavra negativa;;Ninguém é palavra atrativa.;"""
 
 
 # =============================
@@ -163,7 +307,42 @@ def normalizar_camada(c):
             "modoetempo": "verbo_tempo", "modo/tempo": "verbo_tempo", "tempos": "verbo_tempo",
             "verbo_voz": "verbo_voz", "voz": "verbo_voz", "vozverbal": "verbo_voz",
             "verbo_valor": "verbo_valor", "valor": "verbo_valor", "valorverbal": "verbo_valor",
-            "emprego": "verbo_valor", "valorsemantico": "verbo_valor"}.get(n)
+            "emprego": "verbo_valor", "valorsemantico": "verbo_valor",
+            "palavra": "palavra", "empregodapalavra": "palavra", "multifuncional": "palavra", "quese": "palavra",
+            "forma": "forma", "lacuna": "forma", "grafia": "forma", "formacorreta": "forma",
+            "porques": "porques", "porque": "porques", "crase": "crase", "acentuacao": "acentuacao",
+            "acento": "acentuacao", "hifen": "hifen", "hifenizacao": "hifen", "colocacao": "colocacao",
+            "colocacaopronominal": "colocacao", "pronominal": "colocacao", "concordancia": "concordancia",
+            "regencia": "regencia"}.get(n)
+
+
+def _exato(s):
+    """Comparação da camada 'forma': ignora maiúsculas e espaços extras, mas NÃO acentos nem hífen
+    (por que × por quê, a × à, anti-religioso × antirreligioso)."""
+    return re.sub(r"\s+", " ", str(s or "")).strip().casefold()
+
+
+def _ordem_item(i):
+    """Ordem dos destaques: posição; no mesmo trecho, a lacuna (forma) vem primeiro."""
+    return (i["inicio"], -i["fim"], i["camada"] != "forma")
+
+
+def opcoes_item(db, it, semente=None):
+    """Opções do dropdown de um destaque."""
+    if it["camada"] == "forma":
+        ops = list(dict.fromkeys(it.get("opcoes") or []))
+        if it["resposta"] not in ops:
+            ops.append(it["resposta"])
+        random.Random(semente).shuffle(ops)
+        return ops
+    ops = rotulos(db, it["camada"])
+    if it["camada"] == "palavra":
+        alvo = normalizar(it.get("trecho", "")).strip("-")
+        alvo = normalizar(VARIANTES_PALAVRA.get(alvo, alvo))
+        filtradas = [o for o in ops if alvo in normalizar(o.split(":")[0]).split("/")
+                     or normalizar(o.split(":")[0]) == alvo]
+        ops = filtradas or ops
+    return ops if it["resposta"] in ops else ops + [it["resposta"]]
 
 
 def _bolinha(n):
@@ -201,6 +380,8 @@ def _canonico(db, camada, valor, cache):
 def acertou(item, resposta):
     if not resposta:
         return False
+    if item.get("camada") == "forma":
+        return _exato(resposta) in {_exato(item["resposta"])} | {_exato(a) for a in item.get("aceitas") or []}
     validas = {normalizar(item["resposta"])} | {normalizar(a) for a in item.get("aceitas") or []}
     return normalizar(resposta) in validas
 
@@ -252,7 +433,8 @@ def interpretar_csv(db, txt, aceitar_novos=False):
             continue
         if not camada:
             erros.append(f"Linha {n}: camada '{campo('camada')}' inválida (use morfologia, sintaxe, oracoes, "
-                         "pontuacao, tempo, voz ou valor).")
+                         "pontuacao, tempo, voz, valor, palavra, forma, porques, crase, acentuacao, hifen, "
+                         "colocacao, concordancia ou regencia).")
             continue
 
         def validar(valor):
@@ -266,16 +448,29 @@ def interpretar_csv(db, txt, aceitar_novos=False):
                 return valor.strip()
             raise ValueError(f"'{valor}' não está na lista de {NOMES_CAMADA[camada].lower()}")
 
+        m = marcas[0]
+        opcoes = []
         try:
-            resposta = validar(campo("resposta"))
-            if not resposta:
-                raise ValueError("resposta vazia")
-            aceitas = [a for a in (validar(x) for x in campo("aceitas").split("|")) if a and a != resposta]
+            if camada == "forma":
+                resposta = campo("resposta") or m.group(1).strip()
+                opcoes = [o.strip() for o in campo("opcoes").split("|") if o.strip()]
+                if _exato(resposta) != _exato(m.group(1)):
+                    raise ValueError(f"na camada forma, o trecho marcado ({m.group(1)}) deve ser a resposta ({resposta})")
+                if len(opcoes) < 2:
+                    raise ValueError("na camada forma, informe ao menos 2 opções na coluna opcoes, separadas por |")
+                if not any(_exato(o) == _exato(resposta) for o in opcoes):
+                    raise ValueError(f"a resposta '{resposta}' não está entre as opções")
+                resposta = next(o for o in opcoes if _exato(o) == _exato(resposta))
+                aceitas = [a.strip() for a in campo("aceitas").split("|") if a.strip() and _exato(a) != _exato(resposta)]
+            else:
+                resposta = validar(campo("resposta"))
+                if not resposta:
+                    raise ValueError("resposta vazia")
+                aceitas = [a for a in (validar(x) for x in campo("aceitas").split("|")) if a and a != resposta]
         except ValueError as e:
             erros.append(f"Linha {n}: {e}.")
             continue
 
-        m = marcas[0]
         texto = oracao[:m.start()] + m.group(1) + oracao[m.end():]
         ini, fim = m.start(), m.start() + len(m.group(1))
         ex = exercicios.setdefault((grupo, texto), {"grupo": grupo, "texto": texto, "itens": []})
@@ -284,11 +479,11 @@ def interpretar_csv(db, txt, aceitar_novos=False):
             erros.append(f"Linha {n}: destaque repetido na mesma oração.")
             continue
         ex["itens"].append({"id": item_id, "camada": camada, "inicio": ini, "fim": fim, "trecho": m.group(1),
-                            "resposta": resposta, "aceitas": aceitas,
+                            "resposta": resposta, "aceitas": aceitas, "opcoes": opcoes,
                             "explicacao": campo("explicacao").replace("\\n", "\n")})
     out = list(exercicios.values())
     for ex in out:
-        ex["itens"].sort(key=lambda i: (i["inicio"], -i["fim"]))
+        ex["itens"].sort(key=_ordem_item)
     return out, erros, novos
 
 
@@ -305,7 +500,7 @@ def importar(db, exercicios, novos_rotulos, login):
             ja = {i["id"] for i in atual.get("itens") or []}
             novos = [i for i in ex["itens"] if i["id"] not in ja]
             if novos:
-                itens = sorted((atual.get("itens") or []) + novos, key=lambda i: (i["inicio"], -i["fim"]))
+                itens = sorted((atual.get("itens") or []) + novos, key=_ordem_item)
                 db.sx_exercicios.update_one({"_id": atual["_id"]}, {"$set": {"itens": itens}})
                 n_it += len(novos)
         else:
@@ -316,7 +511,8 @@ def importar(db, exercicios, novos_rotulos, login):
 
 
 def prompt_llm(grupo, camadas, quantidade, extras_por_camada):
-    listas = "\n".join(f"  {c}: " + ", ".join(extras_por_camada[c]) for c in camadas)
+    listas = "\n".join(f"  {c}: " + ("a forma correta escrita no trecho marcado" if c == "forma"
+                                      else ", ".join(extras_por_camada[c])) for c in camadas)
     nomes_camadas = ", ".join(camadas)
     dica_geral = ("- Inclua casos que costumam confundir: complemento nominal × adjunto adnominal, objeto indireto × "
                   "complemento nominal, adjetiva restritiva × explicativa, vírgulas proibidas."
@@ -324,6 +520,24 @@ def prompt_llm(grupo, camadas, quantidade, extras_por_camada):
                   "- Inclua casos que costumam confundir: tempos simples × compostos, presente com valor de futuro, "
                   "futuro do pretérito de hipótese × de incerteza, passiva sintética × índice de indeterminação.")
     dica_verbos = ""
+    regras = [c for c in ("porques", "crase", "acentuacao", "hifen", "colocacao", "concordancia", "regencia")
+              if c in camadas]
+    if "palavra" in camadas:
+        dica_verbos += ("\n- Camada palavra: marque SÓ a palavra (que, se, como, onde, cujo, mesmo, a, meio, bastante),"
+                        " ex.: Precisa-{{se}}. A resposta começa pelo nome da palavra (Se: índice de indeterminação do"
+                        " sujeito). Explore apassivador × indeterminador, relativo × integrante, onde e cujo inadequados.")
+    if "forma" in camadas:
+        dica_verbos += ("\n- Camada forma (lacuna): marque no texto a forma CORRETA, que vira lacuna na tela. resposta ="
+                        " essa forma; opcoes = de 2 a 4 formas separadas por |, incluindo a correta e erradas plausíveis"
+                        " (por que|por quê|porque|porquê · a|à|há · antirreligioso|anti-religioso|anti religioso ·"
+                        " ideia|idéia · me disse|disse-me · existem|existe). Nas outras camadas deixe opcoes vazia.")
+    if regras:
+        dica_verbos += ("\n- Para cada lacuna (forma), crie também uma linha com o MESMO trecho marcado na camada da"
+                        f" regra ({', '.join(regras)}), cuja resposta é a justificativa. Também pode haver linhas só"
+                        " com a regra, sem lacuna (ex.: justificar o acento de uma palavra já escrita).")
+        dica_verbos += ("\n- Estilo Cebraspe: palavras acentuadas pela mesma regra, prefixo + r/s, crase antes de"
+                        " possessivo, horas e depois de até, palavras atrativas na colocação, haver = existir, passiva"
+                        " sintética × indeterminação, regência de assistir, aspirar, preferir, implicar e chegar.")
     if any(c.startswith("verbo_") for c in camadas):
         dica_verbos = (
             "\n- Verbos: destaque a forma verbal inteira, incluindo locuções e tempos compostos (ex.: {{teria fugido}},"
@@ -332,16 +546,16 @@ def prompt_llm(grupo, camadas, quantidade, extras_por_camada):
             " com valor de futuro, imperfeito de cortesia, subjuntivo em orações condicionais e concessivas,"
             " passiva sintética × índice de indeterminação do sujeito, e correlação verbal"
             " (se + imperfeito do subjuntivo → futuro do pretérito).")
-    return f"""Você vai criar exercícios de análise morfossintática para concurso.
+    return f"""Você vai criar exercícios de análise morfossintática e de gramática normativa para concurso.
 
 FORMATO (obrigatório):
 - Responda SOMENTE com um bloco CSV, sem texto antes ou depois.
-- Primeira linha exatamente: grupo;oracao;camada;resposta;aceitas;explicacao
+- Primeira linha exatamente: grupo;oracao;camada;resposta;aceitas;explicacao;opcoes
 - Uma linha por trecho destacado. Marque o trecho entre {{{{ e }}}} (para pontuação, marque só a vírgula: {{{{,}}}}).
 - Cada linha tem exatamente UM trecho marcado. Para vários destaques na mesma oração, repita a oração em linhas diferentes, mudando só o trecho marcado.
 - grupo: "{grupo}" em todas as linhas.
 - camada: {nomes_camadas}.
-- resposta: use EXATAMENTE um nome destas listas:
+- resposta: use EXATAMENTE um nome destas listas (na camada forma, a própria forma correta):
 {listas}
 - aceitas: outras respostas também corretas, separadas por | (vazio se não houver).
 - explicacao: uma frase curta justificando a resposta.
@@ -420,15 +634,20 @@ def _css():
     .sx-hl.pontuacao sup{color:#c0392b}
     .sx-hl.verbo_tempo,.sx-hl.verbo_voz,.sx-hl.verbo_valor{background:#dbeafe;border-bottom:2px solid #2563eb}
     .sx-hl.verbo_tempo sup,.sx-hl.verbo_voz sup,.sx-hl.verbo_valor sup{color:#2563eb}
+    .sx-hl.forma{background:#ccfbf1;border-bottom:2px solid #0f766e;letter-spacing:2px;color:#0f766e}
+    .sx-hl.forma sup{color:#0f766e}
+    .sx-hl.porques,.sx-hl.crase,.sx-hl.acentuacao,.sx-hl.hifen,.sx-hl.colocacao,.sx-hl.concordancia,.sx-hl.regencia,
+    .sx-hl.palavra{background:#e0f2fe;border-bottom:2px solid #0369a1}
     .sx-ok{color:#1e7e34}.sx-bad{color:#c0392b}
     .sx-exp{font-size:13px;color:#555;margin:-6px 0 10px 0}
     </style>""", unsafe_allow_html=True)
 
 
-def oracao_html(texto, itens):
+def oracao_html(texto, itens, revelar=False):
     """Oração com os destaques numerados. Destaques aninhados são suportados;
-    sobreposições parciais ficam sem marca na frase (o trecho aparece no rótulo do dropdown)."""
-    numerados = sorted(enumerate(itens), key=lambda x: (x[1]["inicio"], -x[1]["fim"]))
+    sobreposições parciais ficam sem marca na frase (o trecho aparece no rótulo do dropdown).
+    Destaques da camada 'forma' viram lacuna, a menos que revelar=True."""
+    numerados = sorted(enumerate(itens), key=lambda x: _ordem_item(x[1]))
     aceitos, abertos = [], []
     for n, it in numerados:
         while abertos and abertos[-1]["fim"] <= it["inicio"]:
@@ -449,8 +668,13 @@ def oracao_html(texto, itens):
                 netos.append(filhos[j])
                 j += 1
             out.append(_esc(texto[pos:it["inicio"]]))
-            out.append(f"<span class='sx-hl {it['camada']}'>{montar(it['inicio'], it['fim'], netos)}"
-                       f"<sup>{_bolinha(n)}</sup></span>")
+            if it["camada"] == "forma" and not revelar:
+                mesmos = [nn for nn, x in netos if (x["inicio"], x["fim"]) == (it["inicio"], it["fim"])]
+                out.append(f"<span class='sx-hl forma'>{'_' * 8}<sup>{''.join(_bolinha(k) for k in [n] + mesmos)}"
+                           "</sup></span>")
+            else:
+                out.append(f"<span class='sx-hl {it['camada']}'>{montar(it['inicio'], it['fim'], netos)}"
+                           f"<sup>{_bolinha(n)}</sup></span>")
             pos = it["fim"]
             i = j
         out.append(_esc(texto[pos:b]))
@@ -540,7 +764,8 @@ def _sessao(db, login):
     if not ex:
         st.session_state["sx_pos"] = pos + 1
         st.rerun()
-    itens = [i for i in ex.get("itens") or [] if i["camada"] in camadas]
+    itens = sorted((i for i in ex.get("itens") or [] if i["camada"] in camadas), key=_ordem_item)
+    lacunas = {(i["inicio"], i["fim"]): n for n, i in enumerate(itens) if i["camada"] == "forma"}
 
     top1, top2 = st.columns([4, 1])
     top1.progress(pos / len(fila), text=f"Oração {pos + 1} de {len(fila)} · {ex['grupo']}")
@@ -548,17 +773,22 @@ def _sessao(db, login):
         st.session_state["sx_pos"] = len(fila)  # vai para o resultado
         st.rerun()
 
-    st.markdown(oracao_html(ex["texto"], itens), unsafe_allow_html=True)
-
     corrigido = corr.get(pos)
+    st.markdown(oracao_html(ex["texto"], itens, revelar=corrigido is not None), unsafe_allow_html=True)
+
     nonce = st.session_state.get("sx_nonce", 0)
     escolhas = {}
     for n, it in enumerate(itens):
-        opcoes = rotulos(db, it["camada"])
-        if it["resposta"] not in opcoes:
-            opcoes = opcoes + [it["resposta"]]
-        rotulo = f"{_bolinha(n)} **{it['trecho'].strip()}** — {CAMADAS[it['camada']]}"
-        escolhas[it["id"]] = st.selectbox(rotulo, opcoes, index=None, placeholder="Escolha a classificação…",
+        opcoes = opcoes_item(db, it, f"{nonce}{it['id']}")
+        span = (it["inicio"], it["fim"])
+        if span in lacunas and corrigido is None:  # não entrega a resposta da lacuna
+            trecho = f"lacuna {_bolinha(lacunas[span])}"
+        else:
+            trecho = f"**{it['trecho'].strip()}**"
+        rotulo = f"{_bolinha(n)} {trecho} — {CAMADAS[it['camada']]}"
+        escolhas[it["id"]] = st.selectbox(rotulo, opcoes, index=None,
+                                          placeholder="Escolha a forma…" if it["camada"] == "forma"
+                                          else "Escolha a classificação…",
                                           key=f"sx_{nonce}_{pos}_{it['id']}", disabled=corrigido is not None)
         if corrigido is not None:
             r = corrigido[it["id"]]
@@ -828,13 +1058,16 @@ def _aba_importar(db, login):
                 "Linhas com a mesma oração viram um só exercício, com vários destaques.")
     with st.expander("📄 Modelo de CSV"):
         st.code(MODELO_IMPORTACAO, language="text")
-        st.caption("Colunas: grupo;oracao;camada;resposta;aceitas;explicacao. "
-                   "camada = morfologia, sintaxe, oracoes, pontuacao, tempo (modo e tempo verbal), "
-                   "voz ou valor (emprego do tempo verbal). "
-                   "aceitas = outras respostas corretas separadas por |.")
+        st.caption("Colunas: grupo;oracao;camada;resposta;aceitas;explicacao;opcoes. "
+                   "camada = morfologia, sintaxe, oracoes, pontuacao, tempo, voz, valor, palavra (que, se, "
+                   "como…), forma (lacuna), porques, crase, acentuacao, hifen, colocacao, concordancia ou regencia. "
+                   "aceitas = outras respostas corretas separadas por |. "
+                   "opcoes = só na camada forma: as formas oferecidas na lacuna, separadas por | (a marcada no "
+                   "texto é a correta). Para pedir também a regra, repita a linha com o mesmo trecho e a camada da regra.")
     with st.expander("📚 Classificações aceitas (as opções do dropdown)"):
         for c in CAMADAS:
-            st.markdown(f"**{NOMES_CAMADA[c]}:** " + ", ".join(rotulos(db, c)))
+            if c != "forma":
+                st.markdown(f"**{NOMES_CAMADA[c]}:** " + ", ".join(rotulos(db, c)))
 
     with st.expander("🤖 Gerar prompt para a LLM"):
         g1, g2, g3 = st.columns([2, 2, 1])
@@ -849,7 +1082,7 @@ def _aba_importar(db, login):
 
     up = st.file_uploader("Arquivo CSV", type=["csv", "txt"], key="sx_up")
     colado = st.text_area("... ou cole aqui", height=160, key="sx_colar",
-                          placeholder="grupo;oracao;camada;resposta;aceitas;explicacao")
+                          placeholder="grupo;oracao;camada;resposta;aceitas;explicacao;opcoes")
     conteudo = up.getvalue() if up is not None else colado
     if not (conteudo and _decodificar(conteudo).strip()):
         return
@@ -860,10 +1093,12 @@ def _aba_importar(db, login):
     st.caption(f"Prévia: {len(exercicios)} oração(ões), {n_itens} destaque(s)"
                + (f" · {len(erros)} linha(s) com problema" if erros else ""))
     if exercicios:
-        st.markdown("".join(oracao_html(e["texto"], e["itens"]) for e in exercicios[:5]), unsafe_allow_html=True)
+        st.markdown("".join(oracao_html(e["texto"], e["itens"], revelar=True) for e in exercicios[:5]),
+                    unsafe_allow_html=True)
         st.dataframe([{"Grupo": e["grupo"], "Oração": e["texto"], "Destaque": i["trecho"],
                        "Camada": NOMES_CAMADA[i["camada"]], "Resposta": i["resposta"],
-                       "Aceitas": " | ".join(i["aceitas"])} for e in exercicios[:30] for i in e["itens"]],
+                       "Aceitas": " | ".join(i["aceitas"]), "Opções": " | ".join(i.get("opcoes") or [])}
+                      for e in exercicios[:30] for i in e["itens"]],
                      width="stretch", hide_index=True)
     if novos:
         st.info("Classificações novas que serão adicionadas: " + "; ".join(f"{r} ({NOMES_CAMADA[c]})" for c, r in sorted(novos)))
@@ -890,7 +1125,7 @@ def _aba_grupos(db, login, admin):
     st.caption(f"{len(exs)} oração(ões) · {sum(len(e.get('itens') or []) for e in exs)} destaque(s)")
     for e in exs:
         with st.container(border=True):
-            st.markdown(oracao_html(e["texto"], e.get("itens") or []), unsafe_allow_html=True)
+            st.markdown(oracao_html(e["texto"], e.get("itens") or [], revelar=True), unsafe_allow_html=True)
             st.caption(" · ".join(f"{_bolinha(n)} {NOMES_CAMADA[i['camada']]}: {i['resposta']}"
                                   for n, i in enumerate(e.get("itens") or [])))
             if admin and st.button("🗑️ Excluir oração", key=f"sx_del_{e['_id']}"):
