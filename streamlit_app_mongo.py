@@ -5,6 +5,7 @@ import re
 import json
 import html
 import random
+import unicodedata
 import hashlib
 import secrets
 from datetime import datetime, timezone, date, timedelta
@@ -373,6 +374,7 @@ def _init_db_once():
         lambda: discursivas.init_indexes(db),
         lambda: db.cenarios.create_index([("usuario_login", ASCENDING), ("nome", ASCENDING)], name="idx_cenarios"),
         lambda: db.cen_provas.create_index([("usuario_login", ASCENDING), ("cenario_id", ASCENDING)], name="idx_cen_provas"),
+        lambda: db.concursos.create_index([("usuario_login", ASCENDING), ("nome", ASCENDING)], name="idx_concurso"),
         lambda: db.simulados.create_index([("usuario_login", ASCENDING), ("meta.cenario_id", ASCENDING)],
                                           name="idx_sim_cenario"),
         lambda: db.questionarios.update_many(
@@ -1308,147 +1310,357 @@ def render_questao(q_row, parent_qid, questao_numero=None, is_caderno_erros=Fals
 # =============================
 # Páginas
 # =============================
+# =============================
+# Painel: disciplinas × questionários, concursos e prática por disciplina
+# =============================
+def _sem_acento(s):
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return " ".join(s.lower().split())
+
+
+def listar_concursos(login=None):
+    """Concursos do usuário: grupos de disciplinas (ex.: as disciplinas do edital do TRF)."""
+    return [{"id": str(d["_id"]), "nome": d.get("nome", ""), "disciplinas": d.get("disciplinas") or []}
+            for d in get_db().concursos.find({"usuario_login": login or login_atual()}).sort("nome", ASCENDING)]
+
+
+def salvar_concurso(nome, disciplinas, cid=None, login=None):
+    """Cria ou altera um concurso. Retorna None ou a mensagem de erro."""
+    nome, login = (nome or "").strip(), login or login_atual()
+    if not nome:
+        return "Dê um nome ao concurso."
+    db = get_db()
+    filtro = {"usuario_login": login, "nome": nome}
+    if cid:
+        filtro["_id"] = {"$ne": _oid(cid)}
+    if db.concursos.find_one(filtro, {"_id": 1}):
+        return "Já existe um concurso com esse nome."
+    dados = {"nome": nome, "disciplinas": sorted(set(disciplinas or []))}
+    if cid:
+        db.concursos.update_one({"_id": _oid(cid), "usuario_login": login}, {"$set": dados})
+    else:
+        db.concursos.insert_one({**dados, "usuario_login": login, "criado_em": _now_iso()})
+    return None
+
+
+def excluir_concurso(cid, login=None):
+    get_db().concursos.delete_one({"_id": _oid(cid), "usuario_login": login or login_atual()})
+
+
+def fundir_disciplinas(origens, destino):
+    """Passa todos os questionários das disciplinas de origem para a de destino e atualiza os
+    concursos que as citavam. Afeta todos os usuários (questionários são compartilhados).
+    Retorna o nº de questionários alterados."""
+    destino = (destino or "").strip()
+    origens = [o for o in origens or [] if o and o != destino and o != SISTEMA]
+    if not destino or not origens:
+        return 0
+    db = get_db()
+    n = db.questionarios.update_many({"disciplina": {"$in": origens}, "especial": {"$exists": False}},
+                                     {"$set": {"disciplina": destino}}).modified_count
+    for c in db.concursos.find({"disciplinas": {"$in": origens}}, {"disciplinas": 1}):
+        novas = sorted({destino if d in origens else d for d in c["disciplinas"]})
+        db.concursos.update_one({"_id": c["_id"]}, {"$set": {"disciplinas": novas}})
+    get_questionarios.clear()
+    return n
+
+
+def situacao_questoes_multi(questionario_ids, login=None):
+    """{questao_id: última resposta (1/0)} do usuário nos questionários informados."""
+    oids = [o for o in (_oid(q) for q in questionario_ids) if o]
+    pipe = [
+        {"$match": {"usuario_login": login or login_atual(), "questionario_id": {"$in": oids}}},
+        {"$sort": {"respondido_em": 1}},
+        {"$group": {"_id": "$questao_id", "last": {"$last": "$correto"}}},
+    ]
+    return {str(d["_id"]): int(d["last"] or 0) for d in get_db().respostas.aggregate(pipe)}
+
+
+PR_GRUPO_MODOS = {"todas": "Todas as questões", "nao_respondidas": "Só as não respondidas", "erradas": "Só as erradas"}
+
+
+def iniciar_pratica_grupo(rotulo, questionario_ids, modo="todas"):
+    """Monta uma prática com as questões de vários questionários (uma disciplina ou um concurso),
+    embaralhadas, e abre a página Praticar nesse modo."""
+    oids = [o for o in (_oid(q) for q in questionario_ids) if o]
+    ids = [str(d["_id"]) for d in get_db().questoes.find({"questionario_id": {"$in": oids}}, {"_id": 1})]
+    if modo == "nao_respondidas":
+        sit = situacao_questoes_multi(questionario_ids)
+        ids = [q for q in ids if q not in sit]
+    elif modo == "erradas":
+        sit = situacao_questoes_multi(questionario_ids)
+        ids = [q for q in ids if sit.get(q) == 0]
+    if modo != "nao_respondidas":
+        _liberar_para_responder_de_novo(ids)  # permite responder de novo o que já foi respondido
+    random.shuffle(ids)
+    st.session_state["pr_grupo"] = {"rotulo": rotulo, "modo": modo, "ids": ids, "idx": 0}
+    st.session_state["go_to"] = "Praticar"
+
+
+def _sair_pratica_grupo():
+    st.session_state.pop("pr_grupo", None)
+
+
+def _pr_grupo_ir(novo):
+    g = st.session_state.get("pr_grupo")
+    if g:
+        g["idx"] = novo
+
+
+def _praticar_grupo():
+    """Página Praticar no modo disciplina/concurso inteiro."""
+    g = st.session_state["pr_grupo"]
+    st.title("🎯 Praticar")
+    c1, c2 = st.columns([4, 1])
+    c1.markdown(f"**{esc(g['rotulo'])}** · {PR_GRUPO_MODOS.get(g['modo'], '')} · {len(g['ids'])} questões, "
+                "misturadas entre os questionários")
+    c2.button("✖ Sair deste modo", key="prg_sair", on_click=_sair_pratica_grupo, width="stretch")
+    if not g["ids"]:
+        st.success({"nao_respondidas": "🎉 Você já respondeu todas as questões deste grupo.",
+                    "erradas": "🎉 Nenhuma questão com a última resposta errada."}.get(
+            g["modo"], "Nenhuma questão neste grupo."))
+        return
+    idx = max(0, min(int(g.get("idx", 0)), len(g["ids"]) - 1))
+    g["idx"] = idx
+    row = get_questao_by_id(g["ids"][idx])
+    if row is None:  # questão removida no meio do caminho
+        g["ids"].pop(idx)
+        st.rerun()
+
+    feitas = sum(1 for q in g["ids"] if st.session_state.get(f"answered_{q}"))
+    acertos = sum(1 for q in g["ids"] if st.session_state.get(f"answered_{q}") and st.session_state.get(f"result_{q}"))
+    st.progress(feitas / len(g["ids"]),
+                text=f"{feitas} de {len(g['ids'])} respondidas nesta prática · {acertos} acertos")
+    nomes = {q["id"]: q["nome"] for q in get_questionarios()}
+    n1, n2, n3 = st.columns([1, 1, 2])
+    n1.button("◀ Questão anterior", key="prg_prev", disabled=idx == 0, on_click=_pr_grupo_ir, args=(idx - 1,))
+    n2.button("Próxima questão ▶", key="prg_next", disabled=idx >= len(g["ids"]) - 1, on_click=_pr_grupo_ir,
+              args=(idx + 1,))
+    n3.markdown(f"**Questão {idx + 1} de {len(g['ids'])}**  \n"
+                f"<small>{esc(nomes.get(row['questionario_id'], ''))}</small>", unsafe_allow_html=True)
+    render_questao(row, parent_qid=row["questionario_id"], questao_numero=idx + 1)
+    st.button("Próxima questão ▶", key="prg_next_bottom", disabled=idx >= len(g["ids"]) - 1,
+              on_click=_pr_grupo_ir, args=(idx + 1,))
+
+
+def _dash_ir(qid, pagina):
+    st.session_state.pop("pr_grupo", None)
+    _abrir_questionario(qid, pagina)
+
+
+def _dash_botoes_pratica(rotulo, qids, tot, chave):
+    """Botões para responder um grupo inteiro (disciplina ou concurso)."""
+    nao = tot["total"] - tot["respondidas"]
+    erradas = tot["respondidas"] - tot["corretas"]
+    b1, b2, b3 = st.columns(3)
+    b1.button(f"▶ Todas ({tot['total']})", key=f"dash_all_{chave}", type="primary", width="stretch",
+              disabled=not tot["total"], on_click=iniciar_pratica_grupo, args=(rotulo, qids, "todas"),
+              help="Todas as questões, misturadas entre os questionários.")
+    b2.button(f"▶ Não respondidas ({nao})", key=f"dash_nao_{chave}", width="stretch", disabled=not nao,
+              on_click=iniciar_pratica_grupo, args=(rotulo, qids, "nao_respondidas"))
+    b3.button(f"▶ Erradas ({erradas})", key=f"dash_err_{chave}", width="stretch", disabled=not erradas,
+              on_click=iniciar_pratica_grupo, args=(rotulo, qids, "erradas"),
+              help="Questões cuja última resposta foi errada.")
+
+
+def _somar(stats, qids):
+    tot = {k: sum(stats.get(q, _STATS_VAZIO)[k] for q in qids) for k in ("total", "respondidas", "corretas")}
+    tot.update(taxas_desempenho(tot["total"], tot["respondidas"], tot["corretas"]))
+    return tot
+
+
+_BARRAS = {
+    "Aproveitamento (%)": st.column_config.ProgressColumn(
+        "Aproveitamento", help="Acertos ÷ questões resolvidas (última resposta de cada questão)",
+        format="%.0f%%", min_value=0, max_value=100),
+    "Progresso (%)": st.column_config.ProgressColumn(
+        "Progresso", help="Questões resolvidas ÷ total", format="%.0f%%", min_value=0, max_value=100),
+}
+
+
 def page_dashboard():
-    st.title("📚 Painel de Questionários (rápido)")
+    st.title("📚 Painel de Questionários")
     login = login_atual()
-
-    if st.button("📔 Atualizar Caderno de Erros com histórico"):
-        with st.spinner("Analisando respostas anteriores..."):
-            n = popular_caderno_erros(login)
-        if n > 0:
-            st.success(f"✅ {n} questões erradas adicionadas ao Caderno de Erros!")
-        else:
-            st.info("Nenhuma questão nova para adicionar.")
-
-    st.divider()
 
     caderno_erros = _doc_to_row_q(get_caderno_especial("erros", login))
     stats_erros = bulk_stats([caderno_erros["id"]], login).get(caderno_erros["id"], _STATS_VAZIO)
-    with st.container(border=True):
-        st.subheader("🧨 Caderno de Erros (fixado)")
+    with st.expander(f"🧨 Caderno de Erros · {stats_erros['total']} questão(ões)"):
         _bloco_metricas(stats_erros)
         st.caption(f"A questão sai do caderno após {ACERTOS_PARA_SAIR_DO_CADERNO} acertos seguidos nele.")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Praticar Caderno de Erros", key="pr_erros"):
-                st.session_state["current_qid"] = caderno_erros["id"]
-                st.session_state["go_to"] = "Praticar"
-                st.rerun()
-        with c2:
-            if st.button("Gerenciar Caderno de Erros", key="ger_erros"):
-                st.session_state["current_qid"] = caderno_erros["id"]
-                st.session_state["go_to"] = "Gerenciar"
-                st.rerun()
-
-    st.divider()
+        c1, c2, c3 = st.columns(3)
+        c1.button("Praticar Caderno de Erros", key="pr_erros", on_click=_dash_ir, args=(caderno_erros["id"], "Praticar"))
+        c2.button("Gerenciar Caderno de Erros", key="ger_erros", on_click=_dash_ir,
+                  args=(caderno_erros["id"], "Gerenciar"))
+        if c3.button("📔 Atualizar com o histórico", key="dash_pop_erros"):
+            with st.spinner("Analisando respostas anteriores..."):
+                n = popular_caderno_erros(login)
+            st.success(f"✅ {n} questões erradas adicionadas." if n else "Nenhuma questão nova para adicionar.")
 
     qs = questionarios_visiveis(login, incluir_especiais=False)
     if not qs:
         st.info("Nenhum questionário cadastrado ainda. Vá em **Importar CSV** para começar.")
         return
+    stats = bulk_stats([q["id"] for q in qs], login)
+    por_disc = {}
+    for q in qs:
+        por_disc.setdefault(q.get("disciplina") or "Sem Disciplina", []).append(q)
+    todas_disc = sorted(por_disc)
+    concursos = listar_concursos(login)
 
-    filtro_global = st.text_input("🔎 Buscar por nome do questionário", key="dash_busca")
-    disciplinas = sorted({(q.get("disciplina") or "Sem Disciplina") for q in qs})
-    escolha_disc = st.selectbox("📦 Disciplina", ["Todas (resumo)"] + disciplinas, key="dash_disciplina")
+    # ---- Filtros: concurso e busca ----
+    f1, f2 = st.columns(2)
+    conc_por_id = {c["id"]: c for c in concursos}
+    conc_id = f1.selectbox("🏛️ Concurso", [""] + list(conc_por_id), key="dash_concurso",
+                           format_func=lambda i: conc_por_id[i]["nome"] if i else "Todas as disciplinas",
+                           help="Crie concursos em 🏛️ Concursos, abaixo, para agrupar as disciplinas do edital.")
+    busca = _sem_acento(f2.text_input("🔎 Pesquisar por nome", key="dash_busca",
+                                      placeholder="disciplina ou questionário"))
+    conc = conc_por_id.get(conc_id)
+    discs = [d for d in todas_disc if not conc or d in conc["disciplinas"]]
+    if busca:
+        discs = [d for d in discs if busca in _sem_acento(d)
+                 or any(busca in _sem_acento(q["nome"]) for q in por_disc[d])]
 
-    def _filtra(lista):
-        if not filtro_global:
-            return lista
-        return [q for q in lista if filtro_global.lower() in q["nome"].lower()]
+    if conc:
+        qids_conc = [q["id"] for d in discs for q in por_disc[d]]
+        tot_c = _somar(stats, qids_conc)
+        with st.container(border=True):
+            st.markdown(f"**🏛️ {esc(conc['nome'])}** · {len(discs)} disciplina(s) · {tot_c['total']} questões · "
+                        f"progresso {tot_c['cobertura']:.0f}% · aproveitamento "
+                        + (f"{tot_c['perc']:.0f}%" if tot_c["respondidas"] else "—"))
+            _dash_botoes_pratica(f"Concurso: {conc['nome']}", qids_conc, tot_c, f"c_{conc_id}")
+            faltam = [d for d in conc["disciplinas"] if d not in por_disc]
+            if faltam:
+                st.caption("Sem questionários: " + ", ".join(faltam))
 
-    # -------------------------
-    # Modo 1: Todas (resumo leve)
-    # -------------------------
-    if escolha_disc == "Todas (resumo)":
-        qs_filtrados = _filtra(qs)
-        if not qs_filtrados:
-            st.caption("Nenhum questionário corresponde ao filtro.")
+    if not discs:
+        st.info("Nenhuma disciplina com esses filtros.")
+    else:
+        esq, dir_ = st.columns([2, 3], gap="medium")
+        # ---- Caixa 1: disciplinas ----
+        with esq:
+            st.markdown("**📦 Disciplinas**")
+            linhas = []
+            for d in discs:
+                t = _somar(stats, [q["id"] for q in por_disc[d]])
+                linhas.append({"Disciplina": d, "Quest.": len(por_disc[d]), "Questões": t["total"],
+                               "Progresso (%)": round(t["cobertura"], 1),
+                               "Aproveitamento (%)": round(t["perc"], 1) if t["respondidas"] else None})
+            ev = st.dataframe(pd.DataFrame(linhas), key=f"dash_tab_disc_{conc_id}_{busca}", hide_index=True,
+                              on_select="rerun", selection_mode="single-row", height=440, width="stretch",
+                              column_config=_BARRAS)
+            if ev.selection.rows:
+                st.session_state["dash_disc_sel"] = linhas[ev.selection.rows[0]]["Disciplina"]
+            disc = st.session_state.get("dash_disc_sel")
+            if disc not in discs:
+                disc = discs[0]
+            st.caption("Clique numa linha para ver os questionários da disciplina.")
+
+        # ---- Caixa 2: questionários da disciplina ----
+        with dir_:
+            qs_d = por_disc[disc]
+            if busca and busca not in _sem_acento(disc):
+                qs_d = [q for q in qs_d if busca in _sem_acento(q["nome"])] or qs_d
+            tot = _somar(stats, [q["id"] for q in por_disc[disc]])
+            st.markdown(f"**📚 {esc(disc)}** · {len(por_disc[disc])} questionário(s)")
+            p1, p2 = st.columns(2)
+            p1.progress(min(100, int(tot["cobertura"])), text=f"Progresso: {tot['cobertura']:.0f}% "
+                                                              f"({tot['respondidas']} de {tot['total']})")
+            p2.progress(min(100, int(tot["perc"])) if tot["respondidas"] else 0,
+                        text="Aproveitamento: " + (f"{tot['perc']:.0f}%" if tot["respondidas"] else "—"))
+            _dash_botoes_pratica(f"Disciplina: {disc}", [q["id"] for q in por_disc[disc]], tot, f"d_{disc}")
+
+            lq = []
+            for q in qs_d:
+                s = stats.get(q["id"], _STATS_VAZIO)
+                lq.append({"Questionário": q["nome"], "Questões": s["total"], "Resolvidas": s["respondidas"],
+                           "Progresso (%)": round(s["cobertura"], 1),
+                           "Aproveitamento (%)": round(s["perc"], 1) if s["respondidas"] else None})
+            ev2 = st.dataframe(pd.DataFrame(lq), key=f"dash_tab_q_{disc}_{busca}", hide_index=True, on_select="rerun",
+                               selection_mode="single-row", height=300, width="stretch", column_config=_BARRAS)
+            escolhido = qs_d[ev2.selection.rows[0]] if ev2.selection.rows else None
+            if not escolhido:
+                st.caption("Selecione um questionário na tabela para praticar, gerenciar, resetar ou excluir.")
+            else:
+                st.markdown(f"**{esc(escolhido['nome'])}**")
+                b1, b2, b3, b4 = st.columns(4)
+                b1.button("▶ Praticar", key=f"pr_{escolhido['id']}", type="primary", width="stretch",
+                          on_click=_dash_ir, args=(escolhido["id"], "Praticar"))
+                b2.button("Gerenciar", key=f"ger_{escolhido['id']}", width="stretch",
+                          on_click=_dash_ir, args=(escolhido["id"], "Gerenciar"))
+                with b3:
+                    if botao_confirmado("Resetar", key=f"reset_{escolhido['id']}",
+                                        mensagem="Apagar seu histórico de respostas deste questionário?"):
+                        resetar_resolucoes(escolhido["id"])
+                        st.rerun()
+                with b4:
+                    if botao_confirmado("Excluir", key=f"del_{escolhido['id']}",
+                                        mensagem=f"Excluir '{escolhido['nome']}' com todas as questões e respostas? "
+                                                 "Não dá para desfazer."):
+                        delete_questionario(escolhido["id"])
+                        toast_depois(f"Questionário '{escolhido['nome']}' excluído.")
+                        st.rerun()
+
+    st.divider()
+    _dash_concursos(concursos, todas_disc, por_disc)
+    _dash_fundir(todas_disc, por_disc)
+
+
+def _dash_concursos(concursos, todas_disc, por_disc):
+    with st.expander("🏛️ Concursos: agrupar disciplinas por edital"):
+        st.caption("Um concurso reúne as disciplinas do edital. Escolha-o no filtro do topo para ver só essas "
+                   "disciplinas e praticar o concurso inteiro, com as questões misturadas. Cada usuário tem os "
+                   "seus concursos; uma disciplina pode estar em vários.")
+        por_id = {c["id"]: c for c in concursos}
+        cid = st.selectbox("Concurso", [""] + list(por_id), key="dash_conc_edit",
+                           format_func=lambda i: por_id[i]["nome"] if i else "➕ Novo concurso")
+        atual = por_id.get(cid) or {"nome": "", "disciplinas": []}
+        with st.form(f"dash_conc_form_{cid or 'novo'}"):
+            nome = st.text_input("Nome do concurso", atual["nome"], placeholder="Ex.: TRF 1ª Região — Analista Judiciário")
+            discs = st.multiselect("Disciplinas do concurso", todas_disc,
+                                   default=[d for d in atual["disciplinas"] if d in por_disc],
+                                   format_func=lambda d: f"{d} ({len(por_disc[d])})")
+            if st.form_submit_button("💾 Salvar concurso", type="primary"):
+                erro = salvar_concurso(nome, discs, cid or None)
+                if erro:
+                    st.error(erro)
+                else:
+                    toast_depois(f"Concurso '{nome.strip()}' salvo com {len(discs)} disciplina(s).")
+                    st.rerun()
+        if cid and botao_confirmado("🗑️ Excluir concurso", key=f"dash_conc_del_{cid}",
+                                    mensagem=f"Excluir o concurso '{atual['nome']}'? Disciplinas, questionários e "
+                                             "respostas não são afetados."):
+            excluir_concurso(cid)
+            st.session_state.pop("dash_concurso", None)
+            toast_depois("Concurso excluído.")
+            st.rerun()
+
+
+def _dash_fundir(todas_disc, por_disc):
+    with st.expander("🔀 Fundir disciplinas"):
+        if not is_admin():
+            st.caption("Fundir disciplinas altera os questionários de todos os usuários e é restrito ao administrador.")
             return
-
-        stats = bulk_stats([q["id"] for q in qs_filtrados], login)
-        agg = {}
-        for q in qs_filtrados:
-            disc = q.get("disciplina") or "Sem Disciplina"
-            s = stats.get(q["id"], _STATS_VAZIO)
-            a = agg.setdefault(disc, {"questionarios": 0, "total": 0, "respondidas": 0, "corretas": 0})
-            a["questionarios"] += 1
-            a["total"] += s["total"]
-            a["respondidas"] += s["respondidas"]
-            a["corretas"] += s["corretas"]
-
-        rows = []
-        for disc, a in sorted(agg.items()):
-            t = taxas_desempenho(a["total"], a["respondidas"], a["corretas"])
-            rows.append({
-                "Disciplina": disc,
-                "Questionários": a["questionarios"],
-                "Total": a["total"],
-                "Resolvidas": a["respondidas"],
-                "Corretas": a["corretas"],
-                "Aproveitamento (%)": round(t["perc"], 1) if a["respondidas"] else None,
-                "Progresso (%)": round(t["cobertura"], 1),
-            })
-
-        st.subheader("Resumo por disciplina")
-        st.dataframe(
-            rows, width="stretch", hide_index=True,
-            column_config={
-                "Aproveitamento (%)": st.column_config.ProgressColumn(
-                    "Aproveitamento", help="Acertos ÷ questões resolvidas (última resposta de cada questão)",
-                    format="%.1f%%", min_value=0, max_value=100),
-                "Progresso (%)": st.column_config.ProgressColumn(
-                    "Progresso", help="Questões resolvidas ÷ total da disciplina",
-                    format="%.1f%%", min_value=0, max_value=100),
-            })
-        st.caption("Dica: selecione uma disciplina acima para ver e acessar os questionários sem carregar o painel inteiro.")
-        return
-
-    # -------------------------
-    # Modo 2: Uma disciplina
-    # -------------------------
-    qs_disc = _filtra([q for q in qs if (q.get("disciplina") or "Sem Disciplina") == escolha_disc])
-    if not qs_disc:
-        st.caption("Nenhum questionário nesta disciplina corresponde ao filtro.")
-        return
-
-    qids_disc = [q["id"] for q in qs_disc]
-    stats_disc = bulk_stats(qids_disc, login)
-    tot = {k: sum(stats_disc[q][k] for q in qids_disc) for k in ("total", "respondidas", "corretas")}
-    tot.update(taxas_desempenho(tot["total"], tot["respondidas"], tot["corretas"]))
-
-    with st.container(border=True):
-        st.subheader(f"📦 {escolha_disc}")
-        _bloco_metricas(tot, sufixo=" (disciplina)", label_aprov="Aproveitamento da disciplina")
-        st.markdown("---")
-
-        nomes = {q["id"]: q["nome"] for q in qs_disc}
-        sel_id = st.selectbox("Selecione um questionário", list(nomes), format_func=lambda x: nomes[x], key="dash_sel_q")
-        escolhido = next((x for x in qs_disc if x["id"] == sel_id), None)
-
-        if escolhido:
-            _bloco_metricas(stats_disc.get(escolhido["id"], _STATS_VAZIO))
-            b1, b2, b3, b4 = st.columns(4)
-            with b1:
-                if st.button("Praticar", key=f"pr_{escolhido['id']}"):
-                    st.session_state["current_qid"] = escolhido["id"]
-                    st.session_state["go_to"] = "Praticar"
-                    st.rerun()
-            with b2:
-                if st.button("Gerenciar", key=f"ger_{escolhido['id']}"):
-                    st.session_state["current_qid"] = escolhido["id"]
-                    st.session_state["go_to"] = "Gerenciar"
-                    st.rerun()
-            with b3:
-                if botao_confirmado("Resetar resoluções", key=f"reset_{escolhido['id']}",
-                                    mensagem="Apagar seu histórico de respostas deste questionário?"):
-                    resetar_resolucoes(escolhido["id"])
-                    st.rerun()
-            with b4:
-                if botao_confirmado("Excluir", key=f"del_{escolhido['id']}",
-                                    mensagem=f"Excluir '{escolhido['nome']}' com todas as questões e respostas? Não dá para desfazer."):
-                    delete_questionario(escolhido["id"])
-                    toast_depois(f"Questionário '{escolhido['nome']}' excluído.")
-                    st.rerun()
+        st.caption("Junta duas ou mais disciplinas numa só (ex.: \"Português\" e \"Língua Portuguesa\"). Os questionários "
+                   "das disciplinas escolhidas passam para o nome final, e os concursos são atualizados. "
+                   "As respostas e o histórico não mudam.")
+        origens = st.multiselect("Disciplinas a fundir", todas_disc, key="dash_fus_orig",
+                                 format_func=lambda d: f"{d} ({len(por_disc[d])})")
+        destino = st.selectbox("Nome final", todas_disc, index=None, accept_new_options=True, key="dash_fus_dest",
+                               placeholder="Escolha uma das disciplinas ou digite um nome novo")
+        mover = [o for o in origens if o != destino]
+        n = sum(len(por_disc[o]) for o in mover)
+        if mover and destino:
+            st.info(f"{n} questionário(s) de {', '.join(mover)} passarão para **{destino}**.")
+        if botao_confirmado("🔀 Fundir", key="dash_fus_ok", disabled=not (mover and destino),
+                            mensagem=f"Fundir {', '.join(mover)} em '{destino}'? Vale para todos os usuários. "
+                                     "Para desfazer, será preciso mudar a disciplina de cada questionário em Gerenciar."):
+            feitos = fundir_disciplinas(mover, destino)
+            st.session_state["dash_disc_sel"] = destino
+            for k in ("dash_fus_orig", "dash_fus_dest"):
+                st.session_state.pop(k, None)
+            toast_depois(f"{feitos} questionário(s) movidos para '{destino}'.")
+            st.rerun()
 
 
 def _praticar_ir(qid, pool, novo_idx):
@@ -1478,6 +1690,9 @@ def _praticar_carregar_pool(qid):
 
 
 def page_praticar():
+    if st.session_state.get("pr_grupo"):  # modo disciplina/concurso inteiro, aberto pelo Painel
+        _praticar_grupo()
+        return
     st.title("🎯 Praticar")
     qs = questionarios_visiveis()
     if not qs:
@@ -1728,6 +1943,7 @@ def link_questionario(qid):
 
 
 def _abrir_questionario(qid, pagina="Praticar"):
+    st.session_state.pop("pr_grupo", None)
     st.session_state["current_qid"] = qid
     st.session_state["go_to"] = pagina
 
