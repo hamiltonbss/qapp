@@ -1318,24 +1318,45 @@ def _sem_acento(s):
     return " ".join(s.lower().split())
 
 
+def blocos_concurso(c):
+    """{bloco: [disciplinas]} do concurso. Disciplinas de concursos antigos, sem bloco, contam como básicas."""
+    blocos = {b: list((c.get("blocos") or {}).get(b) or []) for b in BLOCOS}
+    soltas = [d for d in c.get("disciplinas") or [] if not any(d in v for v in blocos.values())]
+    blocos[BLOCOS[0]] += soltas
+    return blocos
+
+
+def bloco_da_disciplina(c, disc):
+    return next((b for b, v in blocos_concurso(c).items() if disc in v), None)
+
+
 def listar_concursos(login=None):
-    """Concursos do usuário: grupos de disciplinas (ex.: as disciplinas do edital do TRF)."""
-    return [{"id": str(d["_id"]), "nome": d.get("nome", ""), "disciplinas": d.get("disciplinas") or []}
-            for d in get_db().concursos.find({"usuario_login": login or login_atual()}).sort("nome", ASCENDING)]
+    """Concursos do usuário: as disciplinas do edital, divididas em conhecimentos básicos e específicos."""
+    out = []
+    for d in get_db().concursos.find({"usuario_login": login or login_atual()}).sort("nome", ASCENDING):
+        c = {"id": str(d["_id"]), "nome": d.get("nome", ""), "disciplinas": d.get("disciplinas") or [],
+             "blocos": d.get("blocos") or {}}
+        c["blocos"] = blocos_concurso(c)
+        out.append(c)
+    return out
 
 
-def salvar_concurso(nome, disciplinas, cid=None, login=None):
+def salvar_concurso(nome, basicos, especificos=(), cid=None, login=None):
     """Cria ou altera um concurso. Retorna None ou a mensagem de erro."""
     nome, login = (nome or "").strip(), login or login_atual()
     if not nome:
         return "Dê um nome ao concurso."
+    repetidas = sorted(set(basicos or []) & set(especificos or []))
+    if repetidas:
+        return "Cada disciplina deve ficar num bloco só. Nos dois blocos: " + ", ".join(repetidas) + "."
     db = get_db()
     filtro = {"usuario_login": login, "nome": nome}
     if cid:
         filtro["_id"] = {"$ne": _oid(cid)}
     if db.concursos.find_one(filtro, {"_id": 1}):
         return "Já existe um concurso com esse nome."
-    dados = {"nome": nome, "disciplinas": sorted(set(disciplinas or []))}
+    blocos = {BLOCOS[0]: sorted(set(basicos or [])), BLOCOS[1]: sorted(set(especificos or []))}
+    dados = {"nome": nome, "disciplinas": sorted(set(blocos[BLOCOS[0]]) | set(blocos[BLOCOS[1]])), "blocos": blocos}
     if cid:
         db.concursos.update_one({"_id": _oid(cid), "usuario_login": login}, {"$set": dados})
     else:
@@ -1358,9 +1379,12 @@ def fundir_disciplinas(origens, destino):
     db = get_db()
     n = db.questionarios.update_many({"disciplina": {"$in": origens}, "especial": {"$exists": False}},
                                      {"$set": {"disciplina": destino}}).modified_count
-    for c in db.concursos.find({"disciplinas": {"$in": origens}}, {"disciplinas": 1}):
-        novas = sorted({destino if d in origens else d for d in c["disciplinas"]})
-        db.concursos.update_one({"_id": c["_id"]}, {"$set": {"disciplinas": novas}})
+    for c in db.concursos.find({"disciplinas": {"$in": origens}}, {"disciplinas": 1, "blocos": 1}):
+        troca = lambda lista: sorted({destino if d in origens else d for d in lista})
+        blocos = {b: troca(v) for b, v in blocos_concurso(c).items()}
+        if destino in blocos[BLOCOS[0]] and destino in blocos[BLOCOS[1]]:  # ficou nos dois: vale o básico
+            blocos[BLOCOS[1]].remove(destino)
+        db.concursos.update_one({"_id": c["_id"]}, {"$set": {"disciplinas": troca(c["disciplinas"]), "blocos": blocos}})
     get_questionarios.clear()
     return n
 
@@ -1522,13 +1546,21 @@ def page_dashboard():
                  or any(busca in _sem_acento(q["nome"]) for q in por_disc[d])]
 
     if conc:
-        qids_conc = [q["id"] for d in discs for q in por_disc[d]]
-        tot_c = _somar(stats, qids_conc)
         with st.container(border=True):
-            st.markdown(f"**🏛️ {esc(conc['nome'])}** · {len(discs)} disciplina(s) · {tot_c['total']} questões · "
-                        f"progresso {tot_c['cobertura']:.0f}% · aproveitamento "
-                        + (f"{tot_c['perc']:.0f}%" if tot_c["respondidas"] else "—"))
-            _dash_botoes_pratica(f"Concurso: {conc['nome']}", qids_conc, tot_c, f"c_{conc_id}")
+            st.markdown(f"**🏛️ {esc(conc['nome'])}**")
+            resumo = []
+            for b in BLOCOS:
+                ids_b = [q["id"] for d in conc["blocos"][b] if d in por_disc for q in por_disc[d]]
+                tb = _somar(stats, ids_b)
+                resumo.append({"Bloco": b, "Disciplinas": len(conc["blocos"][b]), "Questões": tb["total"],
+                               "Progresso": f"{tb['cobertura']:.0f}%",
+                               "Aproveitamento": f"{tb['perc']:.0f}%" if tb["respondidas"] else "—"})
+            st.dataframe(resumo, hide_index=True, width="stretch")
+            escopo = st.radio("Praticar", ["Concurso inteiro"] + BLOCOS, horizontal=True, key=f"dash_escopo_{conc_id}")
+            alvo = conc["disciplinas"] if escopo == "Concurso inteiro" else conc["blocos"][escopo]
+            qids_conc = [q["id"] for d in alvo if d in por_disc for q in por_disc[d]]
+            rot = f"Concurso: {conc['nome']}" + ("" if escopo == "Concurso inteiro" else f" · {escopo}")
+            _dash_botoes_pratica(rot, qids_conc, _somar(stats, qids_conc), f"c_{conc_id}_{escopo}")
             faltam = [d for d in conc["disciplinas"] if d not in por_disc]
             if faltam:
                 st.caption("Sem questionários: " + ", ".join(faltam))
@@ -1540,34 +1572,38 @@ def page_dashboard():
         # ---- Caixa 1: disciplinas ----
         with esq:
             st.markdown("**📦 Disciplinas**")
-            linhas = []
-            for d in discs:
-                t = _somar(stats, [q["id"] for q in por_disc[d]])
-                linhas.append({"Disciplina": d, "Quest.": len(por_disc[d]), "Questões": t["total"],
-                               "Progresso (%)": round(t["cobertura"], 1),
-                               "Aproveitamento (%)": round(t["perc"], 1) if t["respondidas"] else None})
+            if conc:  # agrupadas por bloco
+                discs = sorted(discs, key=lambda d: (BLOCOS.index(bloco_da_disciplina(conc, d) or BLOCOS[0]), d))
+                linhas = [{"Disciplina": d, "Bloco": (bloco_da_disciplina(conc, d) or "").replace("Conhecimentos ", "")}
+                          for d in discs]
+            else:
+                linhas = [{"Disciplina": d} for d in discs]
             ev = st.dataframe(pd.DataFrame(linhas), key=f"dash_tab_disc_{conc_id}_{busca}", hide_index=True,
-                              on_select="rerun", selection_mode="single-row", height=440, width="stretch",
-                              column_config=_BARRAS)
-            if ev.selection.rows:
+                              on_select="rerun", selection_mode="single-row", height=360, width="stretch")
+            if ev.selection.rows and ev.selection.rows[0] < len(linhas):
                 st.session_state["dash_disc_sel"] = linhas[ev.selection.rows[0]]["Disciplina"]
             disc = st.session_state.get("dash_disc_sel")
             if disc not in discs:
                 disc = discs[0]
-            st.caption("Clique numa linha para ver os questionários da disciplina.")
+            tot = _somar(stats, [q["id"] for q in por_disc[disc]])
+            with st.container(border=True):
+                st.markdown(f"**📊 {esc(disc)}**")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Questionários", len(por_disc[disc]))
+                m2.metric("Questões", tot["total"])
+                m3.metric("Resolvidas", tot["respondidas"])
+                st.progress(min(100, int(tot["cobertura"])),
+                            text=f"Progresso: {tot['cobertura']:.0f}% ({tot['respondidas']} de {tot['total']})")
+                st.progress(min(100, int(tot["perc"])) if tot["respondidas"] else 0,
+                            text="Aproveitamento: " + (f"{tot['perc']:.0f}% ({tot['corretas']} de "
+                                                       f"{tot['respondidas']} certas)" if tot["respondidas"] else "—"))
 
         # ---- Caixa 2: questionários da disciplina ----
         with dir_:
             qs_d = por_disc[disc]
             if busca and busca not in _sem_acento(disc):
                 qs_d = [q for q in qs_d if busca in _sem_acento(q["nome"])] or qs_d
-            tot = _somar(stats, [q["id"] for q in por_disc[disc]])
             st.markdown(f"**📚 {esc(disc)}** · {len(por_disc[disc])} questionário(s)")
-            p1, p2 = st.columns(2)
-            p1.progress(min(100, int(tot["cobertura"])), text=f"Progresso: {tot['cobertura']:.0f}% "
-                                                              f"({tot['respondidas']} de {tot['total']})")
-            p2.progress(min(100, int(tot["perc"])) if tot["respondidas"] else 0,
-                        text="Aproveitamento: " + (f"{tot['perc']:.0f}%" if tot["respondidas"] else "—"))
             _dash_botoes_pratica(f"Disciplina: {disc}", [q["id"] for q in por_disc[disc]], tot, f"d_{disc}")
 
             lq = []
@@ -1578,7 +1614,8 @@ def page_dashboard():
                            "Aproveitamento (%)": round(s["perc"], 1) if s["respondidas"] else None})
             ev2 = st.dataframe(pd.DataFrame(lq), key=f"dash_tab_q_{disc}_{busca}", hide_index=True, on_select="rerun",
                                selection_mode="single-row", height=300, width="stretch", column_config=_BARRAS)
-            escolhido = qs_d[ev2.selection.rows[0]] if ev2.selection.rows else None
+            linha_q = ev2.selection.rows[0] if ev2.selection.rows else None
+            escolhido = qs_d[linha_q] if linha_q is not None and linha_q < len(qs_d) else None
             if not escolhido:
                 st.caption("Selecione um questionário na tabela para praticar, gerenciar, resetar ou excluir.")
             else:
@@ -1608,24 +1645,27 @@ def page_dashboard():
 
 def _dash_concursos(concursos, todas_disc, por_disc):
     with st.expander("🏛️ Concursos: agrupar disciplinas por edital"):
-        st.caption("Um concurso reúne as disciplinas do edital. Escolha-o no filtro do topo para ver só essas "
-                   "disciplinas e praticar o concurso inteiro, com as questões misturadas. Cada usuário tem os "
-                   "seus concursos; uma disciplina pode estar em vários.")
+        st.caption("Um concurso reúne as disciplinas do edital, divididas em conhecimentos básicos e específicos. "
+                   "Escolha-o no filtro do topo para ver só essas disciplinas e praticar o concurso inteiro ou um "
+                   "bloco. Em **Simulados → Por concurso** ele vira um simulado com a proporção do edital. "
+                   "Cada usuário tem os seus concursos; uma disciplina pode estar em vários.")
         por_id = {c["id"]: c for c in concursos}
         cid = st.selectbox("Concurso", [""] + list(por_id), key="dash_conc_edit",
                            format_func=lambda i: por_id[i]["nome"] if i else "➕ Novo concurso")
-        atual = por_id.get(cid) or {"nome": "", "disciplinas": []}
+        atual = por_id.get(cid) or {"nome": "", "disciplinas": [], "blocos": {b: [] for b in BLOCOS}}
         with st.form(f"dash_conc_form_{cid or 'novo'}"):
             nome = st.text_input("Nome do concurso", atual["nome"], placeholder="Ex.: TRF 1ª Região — Analista Judiciário")
-            discs = st.multiselect("Disciplinas do concurso", todas_disc,
-                                   default=[d for d in atual["disciplinas"] if d in por_disc],
-                                   format_func=lambda d: f"{d} ({len(por_disc[d])})")
+            fmt = lambda d: f"{d} ({len(por_disc[d])})"
+            bas = st.multiselect("📘 Conhecimentos básicos", todas_disc, format_func=fmt,
+                                 default=[d for d in atual["blocos"][BLOCOS[0]] if d in por_disc])
+            esp = st.multiselect("📕 Conhecimentos específicos", todas_disc, format_func=fmt,
+                                 default=[d for d in atual["blocos"][BLOCOS[1]] if d in por_disc])
             if st.form_submit_button("💾 Salvar concurso", type="primary"):
-                erro = salvar_concurso(nome, discs, cid or None)
+                erro = salvar_concurso(nome, bas, esp, cid or None)
                 if erro:
                     st.error(erro)
                 else:
-                    toast_depois(f"Concurso '{nome.strip()}' salvo com {len(discs)} disciplina(s).")
+                    toast_depois(f"Concurso '{nome.strip()}' salvo: {len(bas)} básica(s), {len(esp)} específica(s).")
                     st.rerun()
         if cid and botao_confirmado("🗑️ Excluir concurso", key=f"dash_conc_del_{cid}",
                                     mensagem=f"Excluir o concurso '{atual['nome']}'? Disciplinas, questionários e "
@@ -2397,7 +2437,7 @@ def _sim_aba_novo():
                "ou a partir dos seus **pontos fracos**. As questões aparecem numa página só, "
                "com navegação lateral, e a correção sai no envio — como no Moodle.")
 
-    modo = st.radio("Modo de seleção", ["Por disciplina", "Por questionário", "🎯 Pontos fracos"],
+    modo = st.radio("Modo de seleção", ["Por disciplina", "🏛️ Por concurso", "Por questionário", "🎯 Pontos fracos"],
                     horizontal=True, key="sim_modo")
     sim_nome = st.text_input("Nome do simulado (opcional)", value="", placeholder="Ex.: Simulado Constitucional - 20/01")
 
@@ -2420,6 +2460,10 @@ def _sim_aba_novo():
         help="Equilibrada: cada questionário contribui com a mesma quantidade; se um tiver poucas "
              "questões, entra com todas e a diferença vai para os demais. Proporcional: questionários "
              "maiores contribuem com mais questões.")
+
+    if modo == "🏛️ Por concurso":
+        _sim_novo_concurso(sim_nome, opcoes, distrib)
+        return
 
     if modo == "Por disciplina":
         disciplinas = [d for d in get_all_disciplinas() if d != SISTEMA]
@@ -2504,6 +2548,89 @@ def _sim_aba_novo():
                       "distribuicao": distrib, **opcoes})
             _abrir_simulado(sim_id)
             st.rerun()
+
+
+# ---- Simulado a partir de um concurso (disciplinas agrupadas em básicos e específicos) ----
+def plano_simulado_concurso(blocos, qids_por_disc, contagem, n_total, perc_basicos,
+                            distrib_disc="igual", distrib_q="igual"):
+    """Divide n_total entre os blocos (perc_basicos % para os básicos), depois entre as disciplinas
+    de cada bloco e, por fim, entre os questionários de cada disciplina.
+    Se um bloco não tem questões suficientes, a sobra vai para o outro.
+    Retorna (alloc {questionario_id: k}, {bloco: questões}, linhas da prévia)."""
+    disp_d = {d: sum(contagem.get(q, 0) for q in qids_por_disc.get(d, [])) for b in BLOCOS for d in blocos[b]}
+    disp_b = {b: sum(disp_d[d] for d in blocos[b]) for b in BLOCOS}
+    n_total = min(int(n_total), sum(disp_b.values()))
+    alvo_bas = round(n_total * perc_basicos / 100)
+    cotas_b = {BLOCOS[0]: min(alvo_bas, disp_b[BLOCOS[0]]), BLOCOS[1]: min(n_total - alvo_bas, disp_b[BLOCOS[1]])}
+    sobra = n_total - sum(cotas_b.values())
+    for b in BLOCOS:
+        extra = min(sobra, disp_b[b] - cotas_b[b])
+        cotas_b[b] += extra
+        sobra -= extra
+    alloc, linhas = {}, []
+    for b in BLOCOS:
+        cot_d = alocar_cotas({d: disp_d[d] for d in blocos[b]}, cotas_b[b], distrib_disc)
+        for d in blocos[b]:
+            k = cot_d.get(str(d), 0)
+            alloc.update(alocar_cotas({q: contagem.get(q, 0) for q in qids_por_disc.get(d, [])}, k, distrib_q))
+            linhas.append({"Bloco": b, "Disciplina": d, "Disponíveis": disp_d[d], "No simulado": k})
+    return alloc, cotas_b, linhas
+
+
+def _sim_novo_concurso(sim_nome, opcoes, distrib):
+    concursos = [c for c in listar_concursos() if c["disciplinas"]]
+    if not concursos:
+        st.info("Nenhum concurso ainda. Crie um em **Painel → 🏛️ Concursos**, separando as disciplinas do edital "
+                "em conhecimentos básicos e específicos.")
+        return
+    por_id = {c["id"]: c for c in concursos}
+    cid = st.selectbox("Concurso", list(por_id), format_func=lambda i: por_id[i]["nome"], key="sim_conc")
+    conc = por_id[cid]
+    qids_por_disc = {}
+    for q in get_questionarios_por_disciplina(conc["disciplinas"]):
+        qids_por_disc.setdefault(q.get("disciplina") or "Sem Disciplina", []).append(q["id"])
+    contagem = contar_questoes_por_questionario()
+    disp = {b: sum(contagem.get(q, 0) for d in conc["blocos"][b] for q in qids_por_disc.get(d, [])) for b in BLOCOS}
+    total_disp = sum(disp.values())
+    if not total_disp:
+        st.warning("As disciplinas deste concurso ainda não têm questões.")
+        return
+
+    c1, c2 = st.columns(2)
+    n = c1.number_input("Total de questões", min_value=1, max_value=total_disp, value=min(60, total_disp), step=5,
+                        key=f"sim_conc_n_{cid}", help=f"Disponíveis: {disp[BLOCOS[0]]} básicas e {disp[BLOCOS[1]]} específicas.")
+    so_um = [b for b in BLOCOS if disp[b]]
+    perc = c2.slider("% de conhecimentos básicos", 0, 100,
+                     50 if len(so_um) == 2 else (100 if so_um == [BLOCOS[0]] else 0), step=5,
+                     key=f"sim_conc_perc_{cid}", disabled=len(so_um) < 2,
+                     help="Use a proporção do edital. Ex.: 50 básicas e 70 específicas → 42%.")
+    distrib_disc = st.radio("Distribuição entre as disciplinas de cada bloco", list(DISTRIBUICOES),
+                            format_func=DISTRIBUICOES.get, horizontal=True, key="sim_conc_dd",
+                            help="Equilibrada: cada disciplina do bloco recebe a mesma quantidade. "
+                                 "Proporcional: disciplinas com mais questões recebem mais.")
+    alloc, cotas_b, linhas = plano_simulado_concurso(conc["blocos"], qids_por_disc, contagem, n, perc,
+                                                     distrib_disc, distrib)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📘 Básicos", cotas_b[BLOCOS[0]])
+    m2.metric("📕 Específicos", cotas_b[BLOCOS[1]])
+    m3.metric("Total no simulado", sum(alloc.values()))
+    with st.expander("📊 Prévia por bloco e disciplina", expanded=True):
+        st.dataframe(linhas, width="stretch", hide_index=True)
+    _sim_previa_distribuicao(alloc)
+
+    if st.button("Iniciar Simulado", type="primary", disabled=not sum(alloc.values()), key="sim_conc_ir"):
+        pool_ids = sortear_por_cotas(alloc)
+        if not pool_ids:
+            st.warning("Não foi possível montar o simulado com as escolhas atuais.")
+            return
+        sim_id = create_simulado(
+            sim_nome or f"Simulado {conc['nome']}", pool_ids,
+            meta={"modo": "Por concurso", "concurso_id": cid, "concurso": conc["nome"],
+                  "disciplinas": list(conc["disciplinas"]), "blocos": conc["blocos"], "n_total": int(n),
+                  "perc_basicos": int(perc), "distribuicao": distrib, "distribuicao_disciplinas": distrib_disc,
+                  **opcoes})
+        _abrir_simulado(sim_id)
+        st.rerun()
 
 
 def _sim_previa_distribuicao(alloc):
@@ -3040,6 +3167,12 @@ def _sim_revisao(sim):
     tab_des, tab_rev = st.tabs(["📊 Desempenho", "📝 Revisão das questões"])
 
     with tab_des:
+        blocos_sim = (sim.get("meta") or {}).get("blocos")
+        if blocos_sim:  # simulado por concurso: desempenho por bloco
+            bloco_de = {d: b for b, v in blocos_sim.items() for d in v}
+            st.markdown(f"#### Por bloco · {esc((sim.get('meta') or {}).get('concurso', ''))}")
+            st.dataframe(stats_resultado([{**x, "bloco": bloco_de.get(x["disciplina"], "Outras")} for x in res],
+                                         "bloco", "Bloco"), width="stretch", hide_index=True)
         por_disc = stats_resultado(res, "disciplina", "Disciplina")
         st.markdown("#### Por disciplina")
         st.dataframe(por_disc, width="stretch", hide_index=True)
